@@ -1,0 +1,3 @@
+*.html linguist-generated=true
+README_files/** linguist-generated=true
+figures/** linguist-generated=true
