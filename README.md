@@ -1,36 +1,28 @@
 censoredGP
 ================
 
-- <a href="#censoredgp" id="toc-censoredgp">censoredGP</a>
-  - <a href="#introduction" id="toc-introduction">Introduction</a>
-  - <a href="#repository-structure" id="toc-repository-structure">Repository
-    structure</a>
-  - <a href="#reproducing-the-main-figure"
-    id="toc-reproducing-the-main-figure">Reproducing the main figure</a>
-  - <a href="#load-functions" id="toc-load-functions">Load functions</a>
-  - <a href="#simulate-one-dimensional-censored-data"
-    id="toc-simulate-one-dimensional-censored-data">Simulate one-dimensional
-    censored data</a>
-  - <a href="#explore-the-training-data"
-    id="toc-explore-the-training-data">Explore the training data</a>
-  - <a href="#fit-the-censoredgp-model"
-    id="toc-fit-the-censoredgp-model">Fit the censoredGP model</a>
-  - <a href="#prediction" id="toc-prediction">Prediction</a>
-  - <a href="#visualize-predictions"
-    id="toc-visualize-predictions">Visualize predictions</a>
-  - <a href="#simple-prediction-without-censored-neighbor-moment-adjustment"
-    id="toc-simple-prediction-without-censored-neighbor-moment-adjustment">Simple
-    prediction without censored-neighbor moment adjustment</a>
-  - <a href="#borehole-8-dimensional-simulation"
-    id="toc-borehole-8-dimensional-simulation">Borehole 8-dimensional
-    simulation</a>
-  - <a href="#rendering-this-readme-for-github"
-    id="toc-rendering-this-readme-for-github">Rendering this README for
-    GitHub</a>
-  - <a href="#session-information" id="toc-session-information">Session
-    information</a>
-
-# censoredGP
+- <a href="#introduction" id="toc-introduction">Introduction</a>
+- <a href="#repository-structure" id="toc-repository-structure">Repository
+  structure</a>
+- <a href="#reproducing-the-main-figure"
+  id="toc-reproducing-the-main-figure">Reproducing the main figure</a>
+- <a href="#load-functions" id="toc-load-functions">Load functions</a>
+- <a href="#simulate-one-dimensional-censored-data"
+  id="toc-simulate-one-dimensional-censored-data">Simulate one-dimensional
+  censored data</a>
+- <a href="#explore-the-training-data"
+  id="toc-explore-the-training-data">Explore the training data</a>
+- <a href="#fit-the-censoredgp-model"
+  id="toc-fit-the-censoredgp-model">Fit the censoredGP model</a>
+- <a href="#prediction" id="toc-prediction">Prediction</a>
+- <a href="#visualize-predictions"
+  id="toc-visualize-predictions">Visualize predictions</a>
+- <a href="#simple-prediction-without-censored-neighbor-moment-adjustment"
+  id="toc-simple-prediction-without-censored-neighbor-moment-adjustment">Simple
+  prediction without censored-neighbor moment adjustment</a>
+- <a href="#borehole-8-dimensional-simulation"
+  id="toc-borehole-8-dimensional-simulation">Borehole 8-dimensional
+  simulation</a>
 
 ## Introduction
 
@@ -48,19 +40,7 @@ in `cenGP_fit_pred_functions.R`. The model combines:
 - likelihood-based treatment of right-censored responses
 - Vecchia approximation for scalable computation
 
-This README keeps a vignette-style workflow while explaining the main
-files in the repository. The one-dimensional manuscript example is
-implemented in `VGP_fit_pred_functions_1d.R`, and the corresponding
-figure can be reproduced by running `VGP_run_functions.R`. This script
-produces Plot 1, which compares a standard GP model with the proposed
-censoredGP model.
-
-In addition, the simulation study can be run using
-`cenGP_run_functions.R`. This script applies the proposed censoredGP
-method to the Borehole 8-dimensional example and evaluates prediction
-performance.
-
-This vignette focuses on the following steps:
+This focuses on the following steps:
 
 1.  Simulating censored training and test data
 2.  Exploring the training data
@@ -68,7 +48,7 @@ This vignette focuses on the following steps:
 4.  Generating predictions for new inputs
 5.  Visualizing the predictions against the true function
 
-The main functions used in this vignette are:
+The main functions used are:
 
 - `simulate_1d_censored_data()`
 - `simulate_borehole_censored_data()`
@@ -84,13 +64,13 @@ The main files are:
 
 1.  `cenGP_fit_pred_functions.R`: contains the proposed censoredGP
     fitting and prediction functions.
-2.  `VGP_fit_pred_functions_1d.R`: contains the functions used for the
-    one-dimensional manuscript example.
-3.  `VGP_run_functions.R`: runs the one-dimensional example and produces
-    Plot 1, comparing the standard GP model with the proposed censoredGP
-    model.
-4.  `cenGP_run_functions.R`: runs the Borehole 8-dimensional simulation
+2.  `cenGP_run_functions.R`: runs the Borehole 8-dimensional simulation
     study and evaluates prediction performance.
+3.  `VGP_fit_pred_functions_1d.R`: contains the functions used for the
+    one-dimensional manuscript example.
+4.  `VGP_run_functions.R`: runs the one-dimensional example and produces
+    the following main figure, comparing the standard GP model with the
+    proposed censoredGP model.
 5.  `mc_sov_censored_nd.cpp`: contains the C++ implementation used for
     Monte Carlo simulation under censoring.
 6.  `mc_sov_cpp_usage.R`: provides an example of how to call the C++
@@ -337,9 +317,9 @@ fit$final_log_likelihood
 #> [1] -22.42993
 fit$optim_time
 #>    user  system elapsed 
-#>   0.263   0.413  60.046
+#>   0.261   0.420  58.370
 fit$total_seconds
-#> [1] 60.35059
+#> [1] 58.65458
 fit$used_parallel
 #> [1] TRUE
 ```
@@ -353,27 +333,6 @@ The estimated parameters are:
 - `beta_Intercept`: intercept in the mean function.
 
 ## Prediction
-
-The test data are defined on a fixed 100-point grid:
-
-``` r
-head(test_data)
-#>           x1           y ID  y_censored censored
-#> 1 0.00000000 -0.08466849  1 -0.08466849        0
-#> 2 0.01010101 -0.16183861  2 -0.16183861        0
-#> 3 0.02020202 -0.25079116  3 -0.25079116        0
-#> 4 0.03030303 -0.34931306  4 -0.34931306        0
-#> 5 0.04040404 -0.45497636  5 -0.45497636        0
-#> 6 0.05050505 -0.56518751  6 -0.56518751        0
-tail(test_data)
-#>            x1           y  ID  y_censored censored
-#> 95  0.9494949  0.46835793  95  0.46835793        0
-#> 96  0.9595960  0.28901885  96  0.28901885        0
-#> 97  0.9696970  0.10938337  97  0.10938337        0
-#> 98  0.9797980 -0.06767334  98 -0.06767334        0
-#> 99  0.9898990 -0.23933537  99 -0.23933537        0
-#> 100 1.0000000 -0.40290110 100 -0.40290110        0
-```
 
 We generate predictions using `predict_censored_gp_nn_with_censoring()`.
 This prediction function conditions on nearby uncensored and censored
@@ -394,23 +353,6 @@ pred <- predict_censored_gp_nn_with_censoring(
   verbose = FALSE
 )
 
-pred$average_interval
-#> [1] 0.9181387
-head(pred$results_df)
-#>   ID_test  mean_pred   var_pred   CI_lower    CI_upper interval_length n_total
-#> 1       1 -0.0565998 0.04138639 -0.4553279  0.34212833       0.7974563      20
-#> 2       2 -0.1896147 0.03671581 -0.5651706  0.18594129       0.7511119      20
-#> 3       3 -0.2871950 0.03569056 -0.6574703  0.08308030       0.7405506      20
-#> 4       4 -0.3852831 0.03568647 -0.7555372 -0.01502901       0.7405082      20
-#> 5       5 -0.5029378 0.03562846 -0.8728909 -0.13298475       0.7399061      20
-#> 6       6 -0.5981471 0.03567716 -0.9683529 -0.22794133       0.7404116      20
-#>   n_cens n_uncens
-#> 1      0       20
-#> 2      0       20
-#> 3      0       20
-#> 4      0       20
-#> 5      0       20
-#> 6      0       20
 head(pred$merged_df)
 #>   ID         x1           y  y_censored censored  mean_pred   var_pred
 #> 1  1 0.00000000 -0.08466849 -0.08466849        0 -0.0565998 0.04138639
@@ -458,7 +400,7 @@ p1 <- ggplot(cGP, aes(x = x1)) +
   ) +
   geom_point(
     data = train_fit,
-    aes(x = x1, y = y),
+    aes(x = x1, y = y_raw),
     color = "grey60",
     alpha = 0.6,
     size = 1.8,
@@ -539,7 +481,7 @@ p2 <- ggplot(simple_df, aes(x = x1)) +
   ) +
   geom_point(
     data = train_fit,
-    aes(x = x1, y = y),
+    aes(x = x1, y = y_raw),
     color = "grey60",
     alpha = 0.45,
     size = 1.4,
@@ -576,62 +518,3 @@ This script applies the proposed censoredGP method to an 8-dimensional
 Borehole example and evaluates prediction performance. Because this
 simulation is larger than the one-dimensional illustration, it is not
 run automatically when knitting the README.
-
-## Rendering this README for GitHub
-
-GitHub does not run the R code in `README.Rmd`. Instead, render the file
-locally to create `README.md` and the associated figure files:
-
-``` r
-rmarkdown::render("README.Rmd", output_format = "github_document")
-```
-
-After rendering, commit both the markdown file and the generated figure
-files:
-
-``` bash
-git add README.Rmd README.md README_files figures *.R *.cpp
-git commit -m "Add vignette-style README for censoredGP"
-git push
-```
-
-## Session information
-
-``` r
-sessionInfo()
-#> R version 4.2.2 (2022-10-31)
-#> Platform: aarch64-apple-darwin20 (64-bit)
-#> Running under: macOS 26.5.1
-#> 
-#> Matrix products: default
-#> BLAS:   /Library/Frameworks/R.framework/Versions/4.2-arm64/Resources/lib/libRblas.0.dylib
-#> LAPACK: /Library/Frameworks/R.framework/Versions/4.2-arm64/Resources/lib/libRlapack.dylib
-#> 
-#> locale:
-#> [1] en_US.UTF-8/en_US.UTF-8/en_US.UTF-8/C/en_US.UTF-8/en_US.UTF-8
-#> 
-#> attached base packages:
-#> [1] stats     graphics  grDevices utils     datasets  methods   base     
-#> 
-#> other attached packages:
-#> [1] ggplot2_3.4.0
-#> 
-#> loaded via a namespace (and not attached):
-#>  [1] Rcpp_1.0.12           pillar_1.10.0         compiler_4.2.2       
-#>  [4] RColorBrewer_1.1-3    highr_0.11            tools_4.2.2          
-#>  [7] digest_0.6.35         lattice_0.20-45       evaluate_1.0.5       
-#> [10] lifecycle_1.0.5       tibble_3.2.1          gtable_0.3.6         
-#> [13] pkgconfig_2.0.3       rlang_1.1.3           Matrix_1.6-5         
-#> [16] cli_3.6.2             rstudioapi_0.19.0     yaml_2.3.8           
-#> [19] parallel_4.2.2        mvtnorm_1.2-5         xfun_0.44            
-#> [22] fastmap_1.2.0         withr_3.0.2           dplyr_1.1.4          
-#> [25] knitr_1.42            generics_0.1.3        vctrs_0.6.5          
-#> [28] stats4_4.2.2          grid_4.2.2            tidyselect_1.2.1     
-#> [31] glue_1.8.0            R6_2.6.1              randtoolbox_2.0.4    
-#> [34] TruncatedNormal_2.2.2 optimParallel_1.0-2   tmvtnorm_1.6         
-#> [37] rmarkdown_2.20        alabama_2025.1.0      farver_2.1.2         
-#> [40] magrittr_2.0.3        scales_1.4.0          htmltools_0.5.8.1    
-#> [43] numDeriv_2016.8-1.1   nleqslv_3.3.5         labeling_0.4.3       
-#> [46] sandwich_3.1-1        rngWELL_0.10-9        gmm_1.8              
-#> [49] FNN_1.1.4             zoo_1.8-12
-```

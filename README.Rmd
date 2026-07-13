@@ -23,7 +23,6 @@ knitr::opts_chunk$set(
 )
 ```
 
-# censoredGP
 
 ## Introduction
 
@@ -35,11 +34,8 @@ The proposed censoredGP fitting and prediction functions are implemented in `cen
 - likelihood-based treatment of right-censored responses
 - Vecchia approximation for scalable computation
 
-This README keeps a vignette-style workflow while explaining the main files in the repository. The one-dimensional manuscript example is implemented in `VGP_fit_pred_functions_1d.R`, and the corresponding figure can be reproduced by running `VGP_run_functions.R`. This script produces Plot 1, which compares a standard GP model with the proposed censoredGP model.
 
-In addition, the simulation study can be run using `cenGP_run_functions.R`. This script applies the proposed censoredGP method to the Borehole 8-dimensional example and evaluates prediction performance.
-
-This vignette focuses on the following steps:
+This focuses on the following steps:
 
 1. Simulating censored training and test data
 2. Exploring the training data
@@ -47,7 +43,7 @@ This vignette focuses on the following steps:
 4. Generating predictions for new inputs
 5. Visualizing the predictions against the true function
 
-The main functions used in this vignette are:
+The main functions used are:
 
 - `simulate_1d_censored_data()`
 - `simulate_borehole_censored_data()`
@@ -61,9 +57,9 @@ This repository is not organized as a formal R package. Instead, the method is p
 The main files are:
 
 1. `cenGP_fit_pred_functions.R`: contains the proposed censoredGP fitting and prediction functions.
-2. `VGP_fit_pred_functions_1d.R`: contains the functions used for the one-dimensional manuscript example.
-3. `VGP_run_functions.R`: runs the one-dimensional example and produces Plot 1, comparing the standard GP model with the proposed censoredGP model.
-4. `cenGP_run_functions.R`: runs the Borehole 8-dimensional simulation study and evaluates prediction performance.
+2. `cenGP_run_functions.R`: runs the Borehole 8-dimensional simulation study and evaluates prediction performance.
+3. `VGP_fit_pred_functions_1d.R`: contains the functions used for the one-dimensional manuscript example.
+4. `VGP_run_functions.R`: runs the one-dimensional example and produces the following main figure, comparing the standard GP model with the proposed censoredGP model.
 5. `mc_sov_censored_nd.cpp`: contains the C++ implementation used for Monte Carlo simulation under censoring.
 6. `mc_sov_cpp_usage.R`: provides an example of how to call the C++ functions from R.
 7. `Naive_Approach.R`: implements the naive comparison approach.
@@ -279,13 +275,6 @@ The estimated parameters are:
 
 ## Prediction
 
-The test data are defined on a fixed 100-point grid:
-
-```{r inspect-test-data}
-head(test_data)
-tail(test_data)
-```
-
 We generate predictions using `predict_censored_gp_nn_with_censoring()`. This prediction function conditions on nearby uncensored and censored training IDs and uses truncated-normal moments for censored neighbors.
 
 ```{r prediction}
@@ -303,8 +292,6 @@ pred <- predict_censored_gp_nn_with_censoring(
   verbose = FALSE
 )
 
-pred$average_interval
-head(pred$results_df)
 head(pred$merged_df)
 ```
 
@@ -333,7 +320,7 @@ p1 <- ggplot(cGP, aes(x = x1)) +
   ) +
   geom_point(
     data = train_fit,
-    aes(x = x1, y = y),
+    aes(x = x1, y = y_raw),
     color = "grey60",
     alpha = 0.6,
     size = 1.8,
@@ -397,7 +384,7 @@ p2 <- ggplot(simple_df, aes(x = x1)) +
   ) +
   geom_point(
     data = train_fit,
-    aes(x = x1, y = y),
+    aes(x = x1, y = y_raw),
     color = "grey60",
     alpha = 0.45,
     size = 1.4,
@@ -430,24 +417,4 @@ source("cenGP_run_functions.R")
 
 This script applies the proposed censoredGP method to an 8-dimensional Borehole example and evaluates prediction performance. Because this simulation is larger than the one-dimensional illustration, it is not run automatically when knitting the README.
 
-## Rendering this README for GitHub
 
-GitHub does not run the R code in `README.Rmd`. Instead, render the file locally to create `README.md` and the associated figure files:
-
-```{r render-readme, eval=FALSE}
-rmarkdown::render("README.Rmd", output_format = "github_document")
-```
-
-After rendering, commit both the markdown file and the generated figure files:
-
-```bash
-git add README.Rmd README.md README_files figures *.R *.cpp
-git commit -m "Add vignette-style README for censoredGP"
-git push
-```
-
-## Session information
-
-```{r session-info}
-sessionInfo()
-```
