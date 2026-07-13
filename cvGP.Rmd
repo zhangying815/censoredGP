@@ -1,0 +1,407 @@
+---
+title: "Censored Gaussian Process Regression"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Censored Gaussian Process Regression}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center"
+)
+```
+
+## Introduction
+
+The **censoredGP** repository provides R scripts for fitting Gaussian Process (GP) regression models with right-censored responses. Censored responses occur when the true value is only partially observed because it exceeds a known threshold. Such data appear in many scientific fields, including engineering reliability, environmental monitoring, and biological experiments.
+
+The proposed censored GP fitting and prediction functions are implemented in `cenGP_fit_pred_functions.R`. The model combines:
+
+- Gaussian Process regression
+- likelihood methods for censored responses
+- Vecchia approximation for scalable computation
+
+This vignette demonstrates the complete workflow using a one-dimensional example. The functions used for the one-dimensional manuscript example are provided in `VGP_fit_pred_functions_1d.R`, and the corresponding plot can be reproduced by running `VGP_run_functions.R`. This produces Plot 1, which compares the standard GP model with the proposed censored GP model.
+
+In addition, the main simulation study can be run using `cenGP_run_functions.R`. This script applies the proposed censored GP method to the Borehole 8-dimensional data example and evaluates its prediction performance.
+
+This vignette focuses on the following steps:
+
+1. Simulating censored training and test data
+2. Exploring the training data
+3. Fitting the proposed censored GP model
+4. Generating predictions for new inputs
+5. Visualizing the predictions against the true function
+
+The main functions used in this vignette are:
+
+- `simulate_1d_censored_data()`
+- `simulate_borehole_censored_data()`
+- `fit_censored_gp_nn()`
+- `predict_censored_gp_nn_with_censoring()`
+
+
+
+## Load Functions
+
+```{r}
+library(ggplot2)
+
+source_file <- "cenGP_fit_pred_functions.R"
+if (!file.exists(source_file)) {
+  source_file <- "~/Desktop/censoredGP/cenGP_fit_pred_functions.R"
+}
+source(source_file)
+```
+
+## Simulate One-Dimensional Censored Data
+
+We first generate a dataset using the built-in `generate_1d_data()`. This function produces $n = 800$ total observations, each input location is replicated between 1 and 3 times, and Gaussian noise with standard deviation $\sigma = 0.2$ is added to the true function values. A fixed censoring threshold of `C = 1.221` is applied, meaning any observation exceeding this value is clipped to exactly `C`.
+
+```{r}
+sim <- simulate_1d_censored_data(
+  n = 800,
+  split_method = "id",
+  n_test_grid = 100,
+  threshold_C = 1.221277,
+  seed = 2024,
+  seed_split = 2024,
+  noise_sd = 0.2,
+  reps_min = 1,
+  reps_max = 3
+)
+
+train_data <- sim$train_data
+test_data <- sim$test_data
+C <- sim$threshold_C
+f <- default_1d_fun
+test_data <- make_1d_test_grid(n_test = 100, threshold_C = C, f = f)
+```
+
+The simulated training data contains both the raw noisy response and the
+censored observed response:
+
+- `x1`: input location
+- `y`: raw noisy response before censoring, available because this is simulated data
+- `y_censored`: observed response after right-censoring
+- `censored`: indicator, where `1` means the row is censored
+- `ID`: replicate group ID
+
+For fitting the censored model, use the observed censored response as `y`.
+We keep the raw noisy value in `y_raw` only for diagnostics and plotting.
+
+```{r}
+train_fit <- train_data
+train_fit$y_raw <- train_fit$y
+train_fit$y <- train_fit$y_censored
+
+head(train_fit)
+table(train_fit$censored)
+```
+
+## Explore The Training Data
+
+Before fitting the model it is useful to visualize what the training data looks like, and to understand how censoring affects the observed responses. We first define the true underlying function `f(x)` used to generate the data:
+```{r}
+f <- function(x) {
+  sin(2 * (7 * x - 2)) + 3 * exp(-15^2 * (x - 0.5)^2) + sin(2 * (2 * x - 0.5))
+}
+```
+
+
+
+```{r fig.width=7.5, fig.height=4.5, dpi=150, fig.retina=2, out.width="100%"}
+train_plot <- train_fit
+train_plot$censor_status <- factor(
+  train_plot$censored,
+  levels = c(0, 1),
+  labels = c("observed", "censored")
+)
+
+p0 <- ggplot(train_plot, aes(x = x1)) +
+  geom_point(
+    aes(y = y_raw, color = censor_status, shape = censor_status),
+    alpha = 0.65,
+    size = 1.8
+  ) +
+  geom_line(aes(y = f(x1), color = "true f"), linewidth = 1) +
+  geom_hline(yintercept = C, linetype = "dashed") +
+  labs(
+    title = "One-Dimensional Censored Training Data",
+    subtitle = sprintf("C = %.3f", C),
+    x = "x",
+    y = "observed y",
+    color = NULL,
+    shape = NULL
+  ) +
+  scale_color_manual(
+    values = c(
+      observed = "#1f77b4",
+      censored = "#D55E00",
+      "true f" = "black"
+    )
+  ) +
+  scale_shape_manual(values = c(observed = 16, censored = 17)) +
+  theme_minimal(base_size = 13)
+
+print(p0)
+```
+
+This plot illustrates key aspects of the data:
+
+- the noisy observations scatter around the true function `f(x)` shown as the black curve
+
+- any observation whose true value exceeds the threshold `C = 1.221` is censored and recorded only as `C`, visible as the orange triangles piling up along the dashed horizontal line
+
+- the black curve passes through the bulk of the blue (uncensored) points, confirming the simulation is working as expected
+
+
+## Fit The Censored GP Model
+
+Choose the censored probability method here. For example:
+
+```{r}
+censor_method <- "sov"
+```
+
+
+Other options include:
+
+```{r, eval=FALSE}
+censor_method <- "mc-sov"
+censor_method <- "miwa"
+censor_method <- "genzbretz"
+censor_method <- "met"
+```
+
+
+We estimate the model parameters by maximizing the censored likelihood using `fit_censored_gp_nn()`. 
+
+```{r}
+fit <- fit_censored_gp_nn(
+  train_data = train_fit,
+  x_cols = "x1",
+  threshold_C = C,
+  y_col = "y",
+  censored_col = "censored",
+  id_col = "ID",
+  k = 20,
+  init_params = c(
+    tau_sq = 0.3462413,
+    ell_x1 = 1.5,
+    sigma_sq = 0.02911056,
+    beta_Intercept = 0.01410213
+  ),
+  lower_bounds = c(
+    tau_sq = 1e-6,
+    ell_x1 = 1e-6,
+    sigma_sq = 1e-6,
+    beta_Intercept = -Inf
+  ),
+  upper_bounds = c(
+    tau_sq = Inf,
+    ell_x1 = Inf,
+    sigma_sq = Inf,
+    beta_Intercept = Inf
+  ),
+  censor_method = censor_method,
+  use_parallel = TRUE,
+  optim_control = list(maxit = 200),
+  return_prepared = TRUE
+)
+```
+
+
+The key arguments controlling the model fitting are:
+
+- `train_data` — the training dataset containing both censored and uncensored observations on which the GP is fitted
+
+- `threshold_C` — the censoring threshold
+
+- `x_cols = "x1"` — the column(s) in `train_data` used as input features for the GP covariance structure
+
+- `init_params` — initial values for the hyperparameters (e.g. signal variance, length-scale, noise variance, and mean) passed to the optimizer
+
+- `lower_bounds` — lower bounds for the hyperparameter optimization; the first three parameters are constrained to be strictly positive while the last (mean) is unconstrained
+
+- `upper_bounds` — upper bounds for the hyperparameter optimization; all four parameters are unconstrained from above
+
+- `k` — the number of nearest neighbors used in the local GP approximation during fitting, controlling the trade-off between computational efficiency and model fidelity
+
+
+
+Inspect the fitted model and the estimated parameters are stored in `fit$estimated_params`:
+```{r}
+fit
+
+fit$estimated_params
+fit$final_log_likelihood
+fit$optim_time
+fit$total_seconds
+fit$used_parallel
+```
+
+
+These four values correspond to:
+
+- `tau_sq` — signal variance: controls the overall scale of variability in the latent GP function
+
+- `ell` — length-scale: larger values mean the function varies more slowly over the input space
+
+- `sigma_sq` — noise variance: the nugget term accounting for measurement error
+
+- `beta0` — mean function: intercept of the constant prior mean function; when the response has been centered or no prior trend is expected, this is typically set to 0
+
+
+
+
+## Prediction 
+
+The test data is the fixed 100-point grid:
+
+```{r}
+head(test_data)
+tail(test_data)
+```
+
+Use the censoring-adjusted prediction function `predict_censored_gp_nn_with_censoring()`. This conditions on nearby uncensored and censored training IDs and uses truncated-normal moments for censored neighbors.
+
+```{r}
+pred <- predict_censored_gp_nn_with_censoring(
+  fit = fit,
+  test_data = test_data,
+  k = 20,
+  max_censored_ids = 5,
+  min_uncensored_ids = 15,
+  distance_method = "correlation",
+  moment_method = "auto",
+  predict_y = TRUE,
+  interval_level = 0.95,
+  unique_test_inputs = TRUE,
+  verbose = FALSE
+)
+
+pred$average_interval
+head(pred$results_df)
+head(pred$merged_df)
+```
+
+The key arguments controlling the prediction behavior are:
+
+- `test_data` — the new data points for which predictions are to be generated
+
+- `fit` — the fitted cenGP model object, containing the estimated hyperparameters, kernel structure, and covariance estimates
+
+- `k` — each test point conditions on at most `k` training neighbors
+
+- `min_uncensored_ids` — a test point must have at least half of `max_marker_neighbors` uncensored neighbors; otherwise a fallback rule is applied
+
+- `distance_method = "correlation"` —  neighbors are ranked by GP-implied correlation; alternatively, "euclidean" ranks neighbors by raw Euclidean distance in the input space
+
+- `verbose = FALSE` — suppresses iteration-level progress messages during prediction
+
+
+
+
+
+## Visualize Predictions
+
+To assess model performance visually, we plot the posterior predictive mean and 95% credible interval against the true underlying function `f(x)` and the observed test responses.
+
+```{r fig.width=7.5, fig.height=4.5, dpi=150, fig.retina=2, out.width="100%"}
+cGP <- pred$merged_df
+cGP$true_f <- f(cGP$x1)
+
+p1 <- ggplot(cGP, aes(x = x1)) +
+  geom_ribbon(aes(ymin = CI_lower, ymax = CI_upper, fill = "cvGP 95% CI"),
+              alpha = 0.18) +
+  geom_point(data = train_data, aes(x = x1, y = y),
+             color = "grey60", alpha = 0.6, size = 1.8)+
+  # ---- correct mappings for legend labels/colors ----
+geom_line(aes(y = f(x1),  color = "true f"), linewidth = 1) +   # true f line -> "true f"
+  geom_line(aes(y = mean_pred, color = "cvGP"),  linewidth = 1) +    # model line -> "cvGP"
+  geom_hline(yintercept = C, linetype = "dashed") +
+  labs(
+    title = "cvGP",
+    subtitle = sprintf("C = %.3f", C),
+    x = "x", y = "y", color = NULL, fill = NULL
+  ) +
+  theme_minimal(base_size = 13) +
+  # ---- legend colors + order (keep your original look) ----
+scale_color_manual(values = c("true f" = "#F8766D",   # ggplot2 default red
+                              "cvGP"   = "#00BFC4"),  # ggplot2 default blue/teal
+                   breaks = c("true f", "cvGP")) +
+  scale_fill_manual(values = c("cvGP 95% CI" = "#F8766D33")) +  # light red ribbon
+  guides(
+    color = guide_legend(order = 1),  # lines first
+    fill  = guide_legend(order = 2)   # ribbon below
+  )
+print(p1)
+```
+
+
+## Simple Prediction Without Censored-Neighbor Moment Adjustment
+
+For comparison, the simpler predictor uses only uncensored training rows:
+
+```{r}
+pred_simple <- predict_censored_gp_nn(
+  fit = fit,
+  test_data = test_data,
+  max_marker_neighbors = 20,
+  interval_level = 0.95,
+  include_noise = TRUE
+)
+
+head(pred_simple)
+```
+
+```{r fig.width=7.5, fig.height=4.5, dpi=150, fig.retina=2, out.width="100%"}
+simple_df <- test_data
+simple_df$predicted_mean <- pred_simple$predicted_mean
+simple_df$CI_lower <- pred_simple$CI_lower
+simple_df$CI_upper <- pred_simple$CI_upper
+simple_df$true_f <- f(simple_df$x1)
+
+p2 <- ggplot(simple_df, aes(x = x1)) +
+  geom_ribbon(
+    aes(ymin = CI_lower, ymax = CI_upper, fill = "cvGP 95% CI"),
+    alpha = 0.18
+  ) +
+  geom_point(
+    data = train_fit,
+    aes(x = x1, y = y),
+    color = "grey60",
+    alpha = 0.45,
+    size = 1.4,
+    inherit.aes = FALSE
+  ) +
+  geom_line(aes(y = true_f, color = "true f"), linewidth = 1) +
+  geom_line(aes(y = predicted_mean, color = "cenGP"), linewidth = 1) +
+  geom_hline(yintercept = C, linetype = "dashed") +
+  labs(
+    title = "Prediction Using Uncensored Neighbors",
+    subtitle = sprintf("C = %.3f", C),
+    x = "x",
+    y = "y",
+    color = NULL,
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 13)
+
+print(p2)
+```
+
+
+
+## Session Information
+
+```{r}
+sessionInfo()
+```

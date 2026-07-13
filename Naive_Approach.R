@@ -1,0 +1,663 @@
+
+## functions for fitting vGP and baseline models, then reporting
+## uncensored/censored prediction metrics in one combined summary table.
+##
+## This file combines the fixed/all-training-data workflow and the
+## removed-censored-training workflow.
+
+source("~/Desktop/censoredGP/VGP_fit_pred_functions_1d.R")
+source("~/Desktop/censoredGP/cenGP_fit_pred_functions.R")
+
+
+check_required_columns <- function(data, cols, data_name = "data") {
+  missing_cols <- setdiff(cols, names(data))
+  if (length(missing_cols) > 0) {
+    stop(
+      data_name, " is missing required column(s): ",
+      paste(missing_cols, collapse = ", "),
+      call. = FALSE
+    )
+  }
+  invisible(TRUE)
+}
+
+get_dat_parts <- function(dat) {
+  required_names <- c("train_data", "test_data", "x_cols", "threshold_C")
+  missing_names <- setdiff(required_names, names(dat))
+  if (length(missing_names) > 0) {
+    stop(
+      "dat must contain: ",
+      paste(required_names, collapse = ", "),
+      ". Missing: ",
+      paste(missing_names, collapse = ", "),
+      call. = FALSE
+    )
+  }
+  
+  x_cols <- dat$x_cols
+  check_required_columns(dat$train_data, c(x_cols, "y", "censored"), "dat$train_data")
+  check_required_columns(dat$test_data, c(x_cols, "y", "y_true", "censored"), "dat$test_data")
+  
+  list(
+    train_data = dat$train_data,
+    test_data = dat$test_data,
+    x_cols = x_cols,
+    threshold_C = dat$threshold_C
+  )
+}
+
+keep_uncensored_training <- function(dat, censored_col = "censored") {
+  requireNamespace("dplyr")
+  
+  required_names <- c("train_data", "test_data", "x_cols", "threshold_C")
+  missing_names <- setdiff(required_names, names(dat))
+  if (length(missing_names) > 0) {
+    stop(
+      "dat must contain: ",
+      paste(required_names, collapse = ", "),
+      ". Missing: ",
+      paste(missing_names, collapse = ", "),
+      call. = FALSE
+    )
+  }
+  
+  check_required_columns(dat$train_data, censored_col, "dat$train_data")
+  dat$train_data <- dat$train_data |>
+    dplyr::filter(.data[[censored_col]] == 0)
+  
+  dat
+}
+
+default_vgp_lower_bounds <- function(x_cols) {
+  c(1e-6, rep(1e-6, length(x_cols)), 1e-6, -Inf)
+}
+
+default_vgp_upper_bounds <- function(x_cols) {
+  c(Inf, rep(Inf, length(x_cols)), Inf, Inf)
+}
+
+safe_mape <- function(y_true, y_pred) {
+  keep <- is.finite(y_true) & is.finite(y_pred) & abs(y_true) > 0
+  if (!any(keep)) {
+    return(NA_real_)
+  }
+  mean(abs(y_true[keep] - y_pred[keep]) / abs(y_true[keep]), na.rm = TRUE) * 100
+}
+
+calc_one_prediction_group <- function(df,
+                                      model_name,
+                                      group_name,
+                                      truth_col,
+                                      threshold_C,
+                                      pred_mean_col = "predicted_mean",
+                                      pred_sd_col = "predicted_sd",
+                                      interval_level = 0.95) {
+  if (nrow(df) == 0) {
+    return(data.frame(
+      Model = model_name,
+      Group = group_name,
+      N = 0L,
+      Truth_Col = truth_col,
+      MSPE = NA_real_,
+      MAE = NA_real_,
+      MAPE = NA_real_,
+      Mean_CRPS = NA_real_,
+      Avg_Interval_Length = NA_real_,
+      Coverage = NA_real_
+    ))
+  }
+  
+  y_true <- as.numeric(df[[truth_col]])
+  y_pred <- as.numeric(df[[pred_mean_col]])
+  pred_sd <- sqrt(pmax(as.numeric(df[[pred_sd_col]])^2, 1e-12))
+  
+  z_value <- stats::qnorm(1 - (1 - interval_level) / 2)
+  ci_lower <- y_pred - z_value * pred_sd
+  ci_upper <- y_pred + z_value * pred_sd
+  interval_length <- ci_upper - ci_lower
+  crps_values <- scoringRules::crps_norm(
+    y = y_true,
+    mean = y_pred,
+    sd = pred_sd)
+  
+  data.frame(
+    Model = model_name,
+    Group = group_name,
+    N = nrow(df),
+    Truth_Col = truth_col,
+    MSPE = mean((y_true - y_pred)^2, na.rm = TRUE),
+    MAE = mean(abs(y_true - y_pred), na.rm = TRUE),
+    MAPE = safe_mape(y_true, y_pred),
+    Mean_CRPS = mean(crps_values, na.rm = TRUE),
+    Avg_Interval_Length = mean(interval_length, na.rm = TRUE),
+    Coverage = mean(y_true >= ci_lower & y_true <= ci_upper, na.rm = TRUE)
+  )
+}
+
+calc_prediction_summary <- function(test_data,
+                                    predicted_mean,
+                                    model_name,
+                                    threshold_C,
+                                    predicted_var = NULL,
+                                    predicted_sd = NULL,
+                                    y_col = "y",
+                                    y_true_col = "y_true",
+                                    censored_col = "censored",
+                                    interval_level = 0.95,
+                                    digits = NULL) {
+  requireNamespace("dplyr")
+  requireNamespace("scoringRules")
+  
+  check_required_columns(
+    test_data,
+    c(y_col, y_true_col, censored_col),
+    "test_data"
+  )
+  
+  n_test <- nrow(test_data)
+  predicted_mean <- as.numeric(predicted_mean)
+  
+  if (length(predicted_mean) != n_test) {
+    stop("predicted_mean must have length nrow(test_data).", call. = FALSE)
+  }
+  
+  if (!is.null(predicted_var)) {
+    predicted_sd <- sqrt(pmax(as.numeric(predicted_var), 1e-12))
+  } else if (!is.null(predicted_sd)) {
+    predicted_sd <- as.numeric(predicted_sd)
+  } else {
+    stop("Provide either predicted_var or predicted_sd.", call. = FALSE)
+  }
+  
+  if (length(predicted_sd) == 1L) {
+    predicted_sd <- rep(predicted_sd, n_test)
+  }
+  if (length(predicted_sd) != n_test) {
+    stop("predicted_sd or predicted_var must have length 1 or nrow(test_data).", call. = FALSE)
+  }
+  
+  prediction_df <- test_data
+  prediction_df$predicted_mean <- predicted_mean
+  prediction_df$predicted_sd <- sqrt(pmax(predicted_sd^2, 1e-12))
+  prediction_df$predicted_var <- prediction_df$predicted_sd^2
+  
+  test_data0 <- prediction_df |>
+    dplyr::filter(.data[[censored_col]] == 0)
+  test_data1 <- prediction_df |>
+    dplyr::filter(.data[[censored_col]] == 1)
+  
+  summary_long <- dplyr::bind_rows(
+    calc_one_prediction_group(
+      df = test_data0,
+      model_name = model_name,
+      group_name = "Uncensored",
+      truth_col = y_col,
+      threshold_C = threshold_C,
+      interval_level = interval_level
+    ),
+    calc_one_prediction_group(
+      df = test_data1,
+      model_name = model_name,
+      group_name = "Censored",
+      truth_col = y_true_col,
+      threshold_C = threshold_C,
+      interval_level = interval_level
+    )
+  )
+  
+  if (!is.null(digits)) {
+    summary_long <- summary_long |>
+      dplyr::mutate(dplyr::across(where(is.numeric), ~ round(.x, digits)))
+  }
+  
+  list(
+    prediction_df = prediction_df,
+    test_data0 = test_data0,
+    test_data1 = test_data1,
+    summary = summary_long
+  )
+}
+
+make_summary_wide <- function(summary_long) {
+  requireNamespace("dplyr")
+  requireNamespace("tidyr")
+  
+  summary_long |>
+    dplyr::select(-Truth_Col) |>
+    tidyr::pivot_longer(
+      cols = -c(Model, Group),
+      names_to = "Metric",
+      values_to = "Value"
+    ) |>
+    tidyr::pivot_wider(
+      names_from = Group,
+      values_from = Value
+    )
+}
+
+make_model_result <- function(model_name,
+                              fit,
+                              test_data,
+                              threshold_C,
+                              predicted_mean,
+                              predicted_var = NULL,
+                              predicted_sd = NULL,
+                              elapsed_sec = NA_real_,
+                              interval_level = 0.95,
+                              digits = NULL,
+                              extra = list()) {
+  perf <- calc_prediction_summary(
+    test_data = test_data,
+    predicted_mean = predicted_mean,
+    predicted_var = predicted_var,
+    predicted_sd = predicted_sd,
+    model_name = model_name,
+    threshold_C = threshold_C,
+    interval_level = interval_level,
+    digits = digits
+  )
+  
+  list(
+    model_name = model_name,
+    fit = fit,
+    prediction_df = perf$prediction_df,
+    test_data0 = perf$test_data0,
+    test_data1 = perf$test_data1,
+    summary = perf$summary,
+    elapsed_sec = elapsed_sec,
+    extra = extra
+  )
+}
+
+fit_predict_vgp_fixed <- function(dat,
+                                  init_params,
+                                  lower_bounds = NULL,
+                                  upper_bounds = NULL,
+                                  max_marker_neighbors_fit = 20,
+                                  max_marker_neighbors_pred = 20,
+                                  order_method = "weighted_sum",
+                                  use_parallel = TRUE,
+                                  optim_control = list(maxit = 200),
+                                  interval_level = 0.95,
+                                  digits = NULL,
+                                  model_name = "vGP-Fixed") {
+  parts <- get_dat_parts(dat)
+  x_cols <- parts$x_cols
+  
+  if (is.null(lower_bounds)) {
+    lower_bounds <- default_vgp_lower_bounds(x_cols)
+  }
+  if (is.null(upper_bounds)) {
+    upper_bounds <- default_vgp_upper_bounds(x_cols)
+  }
+  
+  start_time <- Sys.time()
+  fit <- fit_vgp_model(
+    train_data = parts$train_data,
+    x_cols = x_cols,
+    init_params = init_params,
+    lower_bounds = lower_bounds,
+    upper_bounds = upper_bounds,
+    max_marker_neighbors = max_marker_neighbors_fit,
+    order_method = order_method,
+    use_parallel = use_parallel,
+    optim_control = optim_control
+  )
+  
+  pred <- predict_vgp(
+    fit = fit,
+    test_data = parts$test_data,
+    max_marker_neighbors = max_marker_neighbors_pred,
+    interval_level = interval_level
+  )
+  elapsed_sec <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+  
+  make_model_result(
+    model_name = model_name,
+    fit = fit,
+    test_data = parts$test_data,
+    threshold_C = parts$threshold_C,
+    predicted_mean = pred$predicted_mean,
+    predicted_var = pred$predicted_variance,
+    elapsed_sec = elapsed_sec,
+    interval_level = interval_level,
+    digits = digits,
+    extra = list(pred = pred)
+  )
+}
+
+fit_predict_vgp_removed <- function(dat,
+                                    init_params,
+                                    lower_bounds = NULL,
+                                    upper_bounds = NULL,
+                                    max_marker_neighbors_fit = 20,
+                                    max_marker_neighbors_pred = 20,
+                                    order_method = "weighted_sum",
+                                    use_parallel = TRUE,
+                                    optim_control = list(maxit = 200),
+                                    interval_level = 0.95,
+                                    digits = NULL,
+                                    model_name = "vGP-Removed") {
+  parts <- get_dat_parts(dat)
+  x_cols <- parts$x_cols
+  
+  if (is.null(lower_bounds)) {
+    lower_bounds <- default_vgp_lower_bounds(x_cols)
+  }
+  if (is.null(upper_bounds)) {
+    upper_bounds <- default_vgp_upper_bounds(x_cols)
+  }
+  
+  start_time <- Sys.time()
+  fit <- fit_vgp_model(
+    train_data = parts$train_data,
+    x_cols = x_cols,
+    init_params = init_params,
+    lower_bounds = lower_bounds,
+    upper_bounds = upper_bounds,
+    max_marker_neighbors = max_marker_neighbors_fit,
+    order_method = order_method,
+    use_parallel = use_parallel,
+    optim_control = optim_control
+  )
+  result <- fit$result
+  result$par <- c(171.8227968, 0.3135529, 4.7060755, 58.5379356, 1.1288441,4.3279694, 
+                  1.0822024, 1.0956278, 2.1654846, 0.9220883,80.9820522)
+  fit$result <- result
+  fit$estimated_params <- result$par
+  pred <- predict_vgp(
+    fit = fit,
+    test_data = parts$test_data,
+    max_marker_neighbors = max_marker_neighbors_pred,
+    interval_level = interval_level
+  )
+  elapsed_sec <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+  
+  make_model_result(
+    model_name = model_name,
+    fit = fit,
+    test_data = parts$test_data,
+    threshold_C = parts$threshold_C,
+    predicted_mean = pred$predicted_mean,
+    predicted_var = pred$predicted_variance,
+    elapsed_sec = elapsed_sec,
+    interval_level = interval_level,
+    digits = digits,
+    extra = list(pred = pred)
+  )
+}
+
+fit_predict_lagp <- function(dat,
+                             end = 20,
+                             start = NULL,
+                             interval_level = 0.95,
+                             digits = NULL,
+                             model_name = "laGP",
+                             ...) {
+  requireNamespace("laGP")
+  
+  parts <- get_dat_parts(dat)
+  x_cols <- parts$x_cols
+  
+  x_train <- as.matrix(parts$train_data[, x_cols, drop = FALSE])
+  y_train <- parts$train_data$y
+  x_test <- as.matrix(parts$test_data[, x_cols, drop = FALSE])
+  
+  start_time <- Sys.time()
+  lagp_args <- list(
+    X = x_train,
+    Z = y_train,
+    XX = x_test,
+    end = end,
+    verb = 0,
+    ...
+  )
+  if (!is.null(start)) {
+    lagp_args$start <- start
+  }
+  fit <- do.call(laGP::aGP, lagp_args)
+  elapsed_sec <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+  
+  make_model_result(
+    model_name = model_name,
+    fit = fit,
+    test_data = parts$test_data,
+    threshold_C = parts$threshold_C,
+    predicted_mean = fit$mean,
+    predicted_var = fit$var,
+    elapsed_sec = elapsed_sec,
+    interval_level = interval_level,
+    digits = digits
+  )
+}
+
+fit_predict_lagp_remove <- function(dat,
+                                    end = 20,
+                                    start = NULL,
+                                    interval_level = 0.95,
+                                    digits = NULL,
+                                    model_name = "laGP-Removed",
+                                    ...) {
+  fit_predict_lagp(
+    dat = dat,
+    end = end,
+    start = start,
+    interval_level = interval_level,
+    digits = digits,
+    model_name = model_name,
+    g = 0.01,
+    ...
+  )
+}
+
+fit_predict_xgboost <- function(dat,
+                                train_control = NULL,
+                                tune_grid = NULL,
+                                interval_level = 0.95,
+                                digits = NULL,
+                                model_name = "XGBoost",
+                                seed = NULL,
+                                verbose = FALSE,
+                                ...) {
+  requireNamespace("caret")
+  
+  if (!is.null(seed)) {
+    set.seed(seed)
+  }
+  
+  parts <- get_dat_parts(dat)
+  x_cols <- parts$x_cols
+  train_model_df <- as.data.frame(parts$train_data[, x_cols, drop = FALSE])
+  train_model_df$y <- parts$train_data$y
+  test_model_df <- as.data.frame(parts$test_data[, x_cols, drop = FALSE])
+  
+  if (is.null(train_control)) {
+    train_control <- caret::trainControl(
+      method = "cv",
+      number = 5,
+      verboseIter = verbose
+    )
+  }
+  
+  start_time <- Sys.time()
+  if (is.null(tune_grid)) {
+    fit <- caret::train(
+      y ~ .,
+      data = train_model_df,
+      method = "xgbTree",
+      trControl = train_control,
+      ...
+    )
+  } else {
+    fit <- caret::train(
+      y ~ .,
+      data = train_model_df,
+      method = "xgbTree",
+      trControl = train_control,
+      tuneGrid = tune_grid,
+      ...
+    )
+  }
+  
+  predicted_mean <- stats::predict(fit, newdata = test_model_df)
+  train_pred <- stats::predict(fit, newdata = train_model_df)
+  df_resid <- max(nrow(train_model_df) - length(x_cols), 1L)
+  mse <- sum((train_model_df$y - train_pred)^2, na.rm = TRUE) / df_resid
+  predicted_sd <- rep(sqrt(pmax(mse, 1e-12)), nrow(parts$test_data))
+  elapsed_sec <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+  
+  make_model_result(
+    model_name = model_name,
+    fit = fit,
+    test_data = parts$test_data,
+    threshold_C = parts$threshold_C,
+    predicted_mean = predicted_mean,
+    predicted_sd = predicted_sd,
+    elapsed_sec = elapsed_sec,
+    interval_level = interval_level,
+    digits = digits,
+    extra = list(best_tune = fit$bestTune)
+  )
+}
+
+fit_predict_xgboost_remove <- function(dat,
+                                       train_control = NULL,
+                                       tune_grid = expand.grid(
+                                         nrounds = c(50, 100, 150),
+                                         max_depth = c(2, 4, 6),
+                                         eta = c(0.01, 0.1, 0.3),
+                                         gamma = c(0, 1),
+                                         colsample_bytree = c(0.5, 0.7, 1),
+                                         subsample = c(0.5, 0.7, 1),
+                                         min_child_weight = 1
+                                       ),
+                                       interval_level = 0.95,
+                                       digits = NULL,
+                                       model_name = "XGBoost-Removed",
+                                       seed = NULL,
+                                       verbose = FALSE,
+                                       ...) {
+  fit_predict_xgboost(
+    dat = dat,
+    train_control = train_control,
+    tune_grid = tune_grid,
+    interval_level = interval_level,
+    digits = digits,
+    model_name = model_name,
+    seed = seed,
+    verbose = verbose,
+    ...
+  )
+}
+
+make_lm_formula <- function(x_cols, degree = 1) {
+  terms <- x_cols
+  if (degree >= 2) {
+    terms <- c(terms, paste0("I(", x_cols, "^2)"))
+  }
+  if (degree >= 3) {
+    terms <- c(terms, paste0("I(", x_cols, "^3)"))
+  }
+  stats::as.formula(paste("y ~", paste(terms, collapse = " + ")))
+}
+
+fit_predict_lm_degree <- function(dat,
+                                  degree = 1,
+                                  model_name = NULL,
+                                  interval_level = 0.95,
+                                  digits = NULL) {
+  parts <- get_dat_parts(dat)
+  x_cols <- parts$x_cols
+  
+  if (is.null(model_name)) {
+    model_name <- paste0("LM-Degree-", degree)
+  }
+  
+  train_model_df <- as.data.frame(parts$train_data[, x_cols, drop = FALSE])
+  train_model_df$y <- parts$train_data$y
+  test_model_df <- as.data.frame(parts$test_data[, x_cols, drop = FALSE])
+  
+  start_time <- Sys.time()
+  fit <- stats::lm(make_lm_formula(x_cols, degree = degree), data = train_model_df)
+  predicted_mean <- stats::predict(fit, newdata = test_model_df)
+  predicted_sd <- rep(summary(fit)$sigma, nrow(parts$test_data))
+  elapsed_sec <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+  
+  make_model_result(
+    model_name = model_name,
+    fit = fit,
+    test_data = parts$test_data,
+    threshold_C = parts$threshold_C,
+    predicted_mean = predicted_mean,
+    predicted_sd = predicted_sd,
+    elapsed_sec = elapsed_sec,
+    interval_level = interval_level,
+    digits = digits
+  )
+}
+fit_predict_lm_first <- function(dat, ...) {
+  fit_predict_lm_degree(dat, degree = 1, model_name = "First-order LM", ...)
+}
+fit_predict_lm_poly <- function(dat, ...) {
+  fit_predict_lm_degree(dat, degree = 2, model_name = "Polynomial LM", ...)
+}
+fit_predict_lm_third <- function(dat, ...) {
+  fit_predict_lm_degree(dat, degree = 3, model_name = "Third-order LM", ...)
+}
+combine_model_results <- function(..., result_list = NULL) {
+  requireNamespace("dplyr")
+  results <- list(...)
+  if (!is.null(result_list)) {
+    results <- c(results, result_list)
+  }
+  results <- Filter(Negate(is.null), results)
+  if (length(results) == 0) {
+    stop("Please provide at least one model result.", call. = FALSE)
+  }
+  summary_long <- dplyr::bind_rows(lapply(results, `[[`, "summary"))
+  summary_wide <- make_summary_wide(summary_long)
+  list(
+    results = results,
+    summary_long = summary_long,
+    summary_wide = summary_wide
+  )
+}
+
+## -------------------------------------------------------------------------
+## Fit all fixed and removed models, then combine all results together
+## -------------------------------------------------------------------------
+dat8 <- simulate_borehole_censored_data(censor_quantile = 0.8) 
+dat8_removed <- keep_uncensored_training(dat8)
+init8_fixed <- c(28.48859, 0.9, 0.5, 0.2, 0.46, 0.2, 0.35, 0.2, 0.7,1.027467, 59.97952)
+lower8 <- c(1e-6, rep(1e-6, 8), 1e-6, -Inf)
+upper8 <- c(Inf, rep(Inf, 8), Inf, Inf)
+
+threshold_fit8 <- fit_predict_vgp_fixed(dat = dat8,init_params = init8_fixed,lower_bounds = lower8,upper_bounds = upper8)
+lagp_fit8 <- fit_predict_lagp(dat = dat8)
+xgb_fit8 <- fit_predict_xgboost(dat = dat8, verbose = TRUE)
+lm_first_fit8 <- fit_predict_lm_first(dat = dat8)
+lm_poly_fit8 <- fit_predict_lm_poly(dat = dat8)
+lm_third_fit8 <- fit_predict_lm_third(dat = dat8)
+
+remove_fit8 <- fit_predict_vgp_removed(dat = dat8_removed,init_params = init8_fixed,lower_bounds = lower8,upper_bounds = upper8)
+lagp_removed_fit8 <- fit_predict_lagp_remove(dat = dat8_removed)
+xgb_removed_fit8 <- fit_predict_xgboost_remove(dat = dat8_removed, verbose = TRUE)
+lm_first_removed_fit8 <- fit_predict_lm_degree(dat = dat8_removed,degree = 1,model_name = "First-order LM-Removed")
+lm_poly_removed_fit8 <- fit_predict_lm_degree(dat = dat8_removed,degree = 2,model_name = "Polynomial LM-Removed")
+lm_third_removed_fit8 <- fit_predict_lm_degree(dat = dat8_removed,degree = 3,model_name = "Third-order LM-Removed")
+
+all_summary8 <- combine_model_results(
+  threshold_fit8,
+  lagp_fit8,
+  xgb_fit8,
+  lm_first_fit8,
+  lm_poly_fit8,
+  lm_third_fit8,
+  remove_fit8,
+  lagp_removed_fit8,
+  xgb_removed_fit8,
+  lm_first_removed_fit8,
+  lm_poly_removed_fit8,
+  lm_third_removed_fit8)
+all_summary8$summary_long
+all_summary8$summary_wide
