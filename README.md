@@ -27,7 +27,8 @@ censoredGP
 ## Introduction
 
 The **censoredGP** repository provides R scripts for fitting Gaussian
-Process (GP) regression models with right-censored responses. Censored
+Process (GP) regression models with right-censored responses, with a
+particular focus on scalable computation for large datasets. Censored
 responses occur when the true latent response is only partially observed
 because it exceeds a known censoring threshold. Such data arise in many
 scientific applications, including engineering reliability,
@@ -38,7 +39,7 @@ in `cenGP_fit_pred_functions.R`. The model combines:
 
 - Gaussian Process regression
 - likelihood-based treatment of right-censored responses
-- Vecchia approximation for scalable computation
+- Vecchia approximation for scalable computation with large datasets
 
 This focuses on the following steps:
 
@@ -317,9 +318,9 @@ fit$final_log_likelihood
 #> [1] -22.42993
 fit$optim_time
 #>    user  system elapsed 
-#>   0.261   0.420  58.370
+#>   0.262   0.416  60.210
 fit$total_seconds
-#> [1] 58.65458
+#> [1] 60.50465
 fit$used_parallel
 #> [1] TRUE
 ```
