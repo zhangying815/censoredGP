@@ -17,7 +17,7 @@ Sys.setenv(
 Rcpp::sourceCpp("mc_sov_censored_nd.cpp")
 source("cenGP_fit_pred_functions.R")
 source("mc_sov_cpp_usage.R")
-#source("VGP_fit_pred_functions_1d.R")
+source("VGP_fit_pred_functions_1d.R")
 
 
 
@@ -48,12 +48,18 @@ pred1_cens <- predict_censored_gp_nn_with_censoring(
   fit = fit1,
   test_data = test_data,
   k = 20,
-  max_censored_ids = 5
+  max_censored_ids = 5,
+  distance_method = "euclidean",
+  n_pred_samples = 20000,
+  sample_method = "TruncatedNormal",
+  prediction_seed = 123,
+  predict_y = TRUE,
+  verbose = TRUE
 )
 results_df <- pred1_cens$results_df
 merged_df  <- pred1_cens$merged_df
 p4 <- ggplot(merged_df, aes(x = x1)) +
-  geom_ribbon(aes(ymin = CI_lower, ymax = CI_upper, fill = "cvGP 95% CI"),
+  geom_ribbon(aes(ymin = CI_lower, ymax = CI_upper, fill = "cvGP 95% PI"),
               alpha = 0.18) +
   geom_point(data = train_data, aes(x = x1, y = y),
              color = "grey60", alpha = 0.6, size = 1.8)+
@@ -67,11 +73,10 @@ geom_line(aes(y = true_f_1d(x1),  color = "true f"), linewidth = 1) +   # true f
     x = "x", y = "y", color = NULL, fill = NULL
   ) +
   theme_minimal(base_size = 13) +
-  # ---- legend colors + order (keep your original look) ----
-scale_color_manual(values = c("true f" = "#F8766D",   # ggplot2 default red
-                              "cvGP"   = "#00BFC4"),  # ggplot2 default blue/teal
+scale_color_manual(values = c("true f" = "#F8766D",  
+                              "cvGP"   = "#00BFC4"),  
                    breaks = c("true f", "cvGP")) +
-  scale_fill_manual(values = c("cvGP 95% CI" = "#F8766D33")) +  # light red ribbon
+  scale_fill_manual(values = c("cvGP 95% PI" = "#F8766D33")) +  # light red ribbon
   guides(
     color = guide_legend(order = 1),  # lines first
     fill  = guide_legend(order = 2)   # ribbon below
@@ -83,18 +88,12 @@ print(p4)
 
 
 
-
-
-
-
-
-
 ## 8D borehole data
 dat8 <- simulate_borehole_censored_data(censor_quantile = 0.8)
 init8 <- c(28.48859,
-          0.9, 0.5, 0.2, 0.46, 0.2, 0.35, 0.2, 0.7,
-          1.027467,
-          59.97952)
+           0.9, 0.5, 0.2, 0.46, 0.2, 0.35, 0.2, 0.7,
+           1.027467,
+           59.97952)
 # fit cvGP
 fit8_sov <- fit_censored_gp_nn(
   train_data = dat8$train_data,
@@ -115,7 +114,12 @@ pred8_cens <- predict_censored_gp_nn_with_censoring(
   test_data = dat8$test_data,
   k = 20,
   max_censored_ids = 5,
-  distance_method = "euclidean"
+  distance_method = "euclidean",
+  n_pred_samples = 20000,
+  sample_method = "TruncatedNormal",
+  prediction_seed = 123,
+  predict_y = TRUE,
+  verbose = TRUE
 )
 results_df_sov <- pred8_cens$results_df
 merged_df_sov  <- pred8_cens$merged_df
@@ -149,7 +153,12 @@ pred8_cens_mc_sov <- predict_censored_gp_nn_with_censoring(
   test_data = dat8$test_data,
   k = 20,
   max_censored_ids = 5,
-  distance_method = "euclidean"
+  distance_method = "euclidean",
+  n_pred_samples = 20000,
+  sample_method = "TruncatedNormal",
+  prediction_seed = 123,
+  predict_y = TRUE,
+  verbose = TRUE
 )
 results_df_mv_sov <- pred8_cens_mc_sov$results_df
 merged_df_mc_sov  <- pred8_cens_mc_sov$merged_df
@@ -176,7 +185,12 @@ pred8_cens_met <- predict_censored_gp_nn_with_censoring(
   test_data = dat8$test_data,
   k = 20,
   max_censored_ids = 5,
-  distance_method = "euclidean"
+  distance_method = "euclidean",
+  n_pred_samples = 20000,
+  sample_method = "TruncatedNormal",
+  prediction_seed = 123,
+  predict_y = TRUE,
+  verbose = TRUE
 )
 results_df_met <- pred8_cens_met$results_df
 merged_df_met  <- pred8_cens_met$merged_df

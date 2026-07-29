@@ -277,16 +277,19 @@ The estimated parameters are:
 
 We generate predictions using `predict_censored_gp_nn_with_censoring()`. This prediction function conditions on nearby uncensored and censored training IDs and uses truncated-normal moments for censored neighbors.
 
-```{r prediction}
+```{r prediction, cache=FALSE}
 pred <- predict_censored_gp_nn_with_censoring(
   fit = fit,
   test_data = test_data,
   k = 20,
   max_censored_ids = 5,
   min_uncensored_ids = 15,
-  distance_method = "correlation",
-  moment_method = "auto",
+  distance_method = "euclidean",
+  moment_method = "tmvtnorm",
   predict_y = TRUE,
+  n_pred_samples = 20000,
+  sample_method = "TruncatedNormal",
+  prediction_seed = 123,
   interval_level = 0.95,
   unique_test_inputs = TRUE,
   verbose = FALSE
@@ -302,8 +305,12 @@ The key prediction arguments are:
 - `k`: the maximum number of neighboring training IDs used for prediction.
 - `max_censored_ids`: the maximum number of censored neighboring IDs used for moment adjustment.
 - `min_uncensored_ids`: the minimum number of uncensored neighboring IDs required before applying the default prediction rule.
-- `distance_method = "correlation"`: ranks neighbors by GP-implied correlation.
-- `interval_level = 0.95`: produces 95% prediction intervals.
+- `distance_method = "euclidean"`: ranks neighbors by Euclidean distance in the input space.
+- `moment_method = "tmvtnorm"`: computes the truncated-normal moments used for the analytical predictive mean and variance.
+- `n_pred_samples`: number of predictive samples used to estimate empirical interval quantiles.
+- `sample_method = "TruncatedNormal"`: samples censored-neighbor latent values from the truncated multivariate normal using the `TruncatedNormal` package.
+- `interval_level`: sets the nominal prediction-interval coverage; with censored neighbors, the endpoints are the matching empirical quantiles of the predictive samples.
+- `verbose = FALSE`: suppresses progress messages during prediction.
 
 ## Visualize predictions
 
@@ -392,6 +399,13 @@ p2 <- ggplot(simple_df, aes(x = x1)) +
   ) +
   geom_line(aes(y = true_f, color = "true f"), linewidth = 1) +
   geom_line(aes(y = predicted_mean, color = "simple predictor"), linewidth = 1) +
+  scale_color_manual(
+    values = c(
+      "true f" = "#F8766D",
+      "simple predictor" = "#00BFC4"
+    ),
+    breaks = c("true f", "simple predictor")
+  ) +
   geom_hline(yintercept = C, linetype = "dashed") +
   labs(
     title = "Prediction using uncensored neighbors only",

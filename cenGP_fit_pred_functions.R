@@ -1,10 +1,14 @@
+
 ## Censored nearest-neighbor GP code for 1D and borehole 8D data.
 ##
 ## Main functions:
 ##   simulate_1d_censored_data()
 ##   simulate_borehole_censored_data()
 ##   fit_censored_gp_nn()
-##   predict_censored_gp_nn()
+##   predict_censored_gp_nn_with_censoring()
+##
+## Composition Sampler: when censored neighbors are present, the interval is based
+## on empirical predictive quantiles from the two-stage composition sampler.
 ##
 ## Default parameter order for d predictors and intercept-only mean:
 ##   c(tau_sq, ell_1, ..., ell_d, sigma_sq, beta0)
@@ -964,20 +968,20 @@ censored_tail_prob <- function(mu,
         releps = genzbretz_releps
       )
     )[1],
-#'    met = TruncatedNormal::pmvnorm(
-#      lb = rep(C, r),
-#      ub = rep(Inf, r),
-#      mu = mu,
-#      sigma = Sigma,
-#      type = tn_type,
-#      B = tn_B
-#    )[1]'
-      met = TruncatedNormal::mvNcdf(
-       l = rep(C, r) - as.numeric(mu),
-       u = rep(Inf, r) - as.numeric(mu),
-       Sig = Sigma#,
-       #n = tn_B
-      )$prob
+    #'    met = TruncatedNormal::pmvnorm(
+    #      lb = rep(C, r),
+    #      ub = rep(Inf, r),
+    #      mu = mu,
+    #      sigma = Sigma,
+    #      type = tn_type,
+    #      B = tn_B
+    #    )[1]'
+    met = TruncatedNormal::mvNcdf(
+      l = rep(C, r) - as.numeric(mu),
+      u = rep(Inf, r) - as.numeric(mu),
+      Sig = Sigma#,
+      #n = tn_B
+    )$prob
   )
   
   p <- as.numeric(p)
@@ -1420,100 +1424,308 @@ bind_rows_fill <- function(a, b) {
 }
 
 ## Compute moments of a multivariate normal truncated to a rectangular region.
+##
+## For more than one censored response, method = "auto" first uses
+## tmvtnorm::mtmvnorm(). If that is unavailable or fails, it estimates the
+## moments from exact TruncatedNormal::rtmvnorm() draws.
 truncated_mvn_moments <- function(mu,
                                   Sigma,
                                   lower,
                                   upper,
-                                  method = c("auto", "TruncatedNormal", "tmvtnorm", "mc", "univariate"),
-                                  mc_samples = 20000L) {
+                                  method = c("auto", "tmvtnorm", "TruncatedNormal", "mc", "univariate"),
+                                  mc_samples = 20000L,
+                                  mc_burn_in = 2000L,
+                                  mc_thinning = 5L) {
   method <- match.arg(method)
   
-  if (method %in% c("auto", "TruncatedNormal") &&
-      requireNamespace("TruncatedNormal", quietly = TRUE)) {
+  mu <- as.numeric(mu)
+  Sigma <- make_posdef_prediction(as.matrix(Sigma))
+  p <- length(mu)
+  
+  expand_bound <- function(x, name) {
+    x <- as.numeric(x)
+    if (length(x) == 1L) {
+      return(rep(x, p))
+    }
+    if (length(x) != p) {
+      stop(sprintf("%s must have length 1 or length(mu).", name))
+    }
+    x
+  }
+  
+  lower <- expand_bound(lower, "lower")
+  upper <- expand_bound(upper, "upper")
+  
+  if (!all(dim(Sigma) == c(p, p))) {
+    stop("Sigma must be a square matrix with dimension length(mu).")
+  }
+  if (any(lower >= upper)) {
+    stop("Every lower truncation bound must be smaller than its upper bound.")
+  }
+  
+  ## Exact analytical moments for the one-sided univariate case used here.
+  if (p == 1L &&
+      method %in% c("auto", "univariate") &&
+      is.infinite(upper[1L]) && upper[1L] > 0) {
+    sd_value <- sqrt(max(Sigma[1L, 1L], 1e-12))
+    alpha <- (lower[1L] - mu[1L]) / sd_value
+    
+    log_tail <- stats::pnorm(alpha, lower.tail = FALSE, log.p = TRUE)
+    lambda <- exp(stats::dnorm(alpha, log = TRUE) - log_tail)
+    
+    truncated_mean <- mu[1L] + sd_value * lambda
+    truncated_var <- sd_value^2 * (1 + alpha * lambda - lambda^2)
+    truncated_var <- max(truncated_var, 1e-10)
+    
+    return(list(
+      mean = truncated_mean,
+      var = matrix(truncated_var, nrow = 1L, ncol = 1L),
+      method_used = "univariate exact"
+    ))
+  }
+  
+  ## Deterministic Tallis-moment calculation.
+  if (method %in% c("auto", "tmvtnorm") &&
+      requireNamespace("tmvtnorm", quietly = TRUE)) {
     mt <- tryCatch(
-      TruncatedNormal::mvNmoments(
-        l = lower,
-        u = upper,
-        Sig = as.matrix(Sigma),
-        mu = as.numeric(mu)
+      tmvtnorm::mtmvnorm(
+        mean = mu,
+        sigma = Sigma,
+        lower = lower,
+        upper = upper
       ),
       error = function(e) NULL
     )
     
     if (!is.null(mt)) {
-      mt_mean <- as.numeric(mt$mean)
-      mt_var <- as.matrix(mt$var)
+      mt_mean <- as.numeric(mt$tmean)
+      mt_var <- as.matrix(mt$tvar)
+      if (p == 1L) {
+        mt_var <- matrix(mt_var, nrow = 1L, ncol = 1L)
+      }
       if (all(is.finite(mt_mean)) && all(is.finite(mt_var))) {
-        return(list(mean = mt_mean, var = mt_var))
+        return(list(
+          mean = mt_mean,
+          var = mt_var,
+          method_used = "tmvtnorm::mtmvnorm"
+        ))
       }
     }
-  }
-  
-  if (method %in% c("auto", "tmvtnorm") &&
-      requireNamespace("tmvtnorm", quietly = TRUE)) {
-    mt <- tmvtnorm::mtmvnorm(
-      mean = as.numeric(mu),
-      sigma = as.matrix(Sigma),
-      lower = lower,
-      upper = upper
-    )
-    mt_mean <- as.numeric(mt$tmean)
-    mt_var <- as.matrix(mt$tvar)
-    if (all(is.finite(mt_mean)) && all(is.finite(mt_var))) {
-      return(list(mean = mt_mean, var = mt_var))
+    
+    if (method == "tmvtnorm") {
+      stop("tmvtnorm::mtmvnorm() did not return finite truncated moments.")
     }
   }
   
-  if (method %in% c("auto", "mc") &&
-      requireNamespace("tmvtnorm", quietly = TRUE)) {
+  ## Monte Carlo moment calculation using exact minimax-tilting draws.
+  if (method %in% c("auto", "TruncatedNormal", "mc") &&
+      requireNamespace("TruncatedNormal", quietly = TRUE)) {
     samples <- tryCatch(
-      tmvtnorm::rtmvnorm(
-        n = mc_samples,
-        mean = as.numeric(mu),
-        sigma = as.matrix(Sigma),
-        lower = lower,
-        upper = upper,
-        algorithm = "gibbs"
+      TruncatedNormal::rtmvnorm(
+        n = as.integer(mc_samples),
+        mu = mu,
+        sigma = Sigma,
+        lb = lower,
+        ub = upper
       ),
       error = function(e) NULL
     )
     
     if (!is.null(samples)) {
       samples <- as.matrix(samples)
+      if (ncol(samples) != p && nrow(samples) == p) {
+        samples <- t(samples)
+      }
+      if (p == 1L && ncol(samples) != 1L) {
+        samples <- matrix(as.numeric(samples), ncol = 1L)
+      }
+      
       mt_mean <- colMeans(samples)
       mt_var <- stats::cov(samples)
-      if (length(mt_mean) == 1L) {
+      if (p == 1L) {
         mt_var <- matrix(mt_var, nrow = 1L, ncol = 1L)
       }
+      
       if (all(is.finite(mt_mean)) && all(is.finite(mt_var))) {
-        return(list(mean = as.numeric(mt_mean), var = as.matrix(mt_var)))
+        return(list(
+          mean = as.numeric(mt_mean),
+          var = as.matrix(mt_var),
+          method_used = "TruncatedNormal Monte Carlo"
+        ))
+      }
+    }
+    
+    if (method == "TruncatedNormal") {
+      stop("TruncatedNormal::rtmvnorm() did not return usable draws.")
+    }
+  }
+  
+  ## Last-resort MCMC moment calculation.
+  if (method %in% c("auto", "mc") &&
+      requireNamespace("tmvtnorm", quietly = TRUE)) {
+    samples <- tryCatch(
+      tmvtnorm::rtmvnorm(
+        n = as.integer(mc_samples),
+        mean = mu,
+        sigma = Sigma,
+        lower = lower,
+        upper = upper,
+        algorithm = "gibbs",
+        burn.in.samples = as.integer(mc_burn_in),
+        thinning = as.integer(mc_thinning)
+      ),
+      error = function(e) NULL
+    )
+    
+    if (!is.null(samples)) {
+      samples <- as.matrix(samples)
+      if (ncol(samples) != p && nrow(samples) == p) {
+        samples <- t(samples)
+      }
+      if (p == 1L && ncol(samples) != 1L) {
+        samples <- matrix(as.numeric(samples), ncol = 1L)
+      }
+      
+      mt_mean <- colMeans(samples)
+      mt_var <- stats::cov(samples)
+      if (p == 1L) {
+        mt_var <- matrix(mt_var, nrow = 1L, ncol = 1L)
+      }
+      
+      if (all(is.finite(mt_mean)) && all(is.finite(mt_var))) {
+        return(list(
+          mean = as.numeric(mt_mean),
+          var = as.matrix(mt_var),
+          method_used = "tmvtnorm Gibbs Monte Carlo"
+        ))
       }
     }
   }
   
-  if (method %in% c("auto", "univariate")) {
-    sd <- sqrt(pmax(diag(Sigma), 1e-12))
-    alpha <- (lower - as.numeric(mu)) / sd
-    tail_prob <- stats::pnorm(alpha, lower.tail = FALSE)
-    lambda <- ifelse(
-      tail_prob > 0,
-      stats::dnorm(alpha) / tail_prob,
-      alpha + 1 / pmax(abs(alpha), 1e-8)
-    )
-    mt_mean <- as.numeric(mu) + sd * lambda
-    mt_var_diag <- sd^2 * (1 + alpha * lambda - lambda^2)
-    mt_var_diag <- pmax(mt_var_diag, 1e-10)
-    mt_var <- diag(mt_var_diag, length(mt_var_diag))
-    
-    if (all(is.finite(mt_mean)) && all(is.finite(mt_var))) {
-      return(list(mean = mt_mean, var = mt_var))
-    }
+  if (method == "univariate" && p > 1L) {
+    stop("method = 'univariate' is valid only for one censored response.")
   }
   
-  stop("Could not compute finite truncated-normal moments. Try another moment_method or fewer censored neighbors.")
+  stop(
+    paste0(
+      "Could not compute finite truncated-normal moments. ",
+      "Install tmvtnorm and/or TruncatedNormal, or try fewer censored neighbors."
+    )
+  )
 }
 
-## Predict at one test point while integrating over censored neighbors by TMVN moments.
+## Draw from a multivariate normal distribution truncated to a rectangle.
+## The default uses the minimax-tilting sampler in TruncatedNormal.
+sample_truncated_mvn <- function(n,
+                                 mu,
+                                 Sigma,
+                                 lower,
+                                 upper,
+                                 method = c("TruncatedNormal", "tmvtnorm_gibbs", "tmvtnorm_rejection"),
+                                 burn_in = 2000L,
+                                 thinning = 5L) {
+  method <- match.arg(method)
+  
+  n <- as.integer(n)
+  if (length(n) != 1L || is.na(n) || n < 2L) {
+    stop("n must be a single integer of at least 2.")
+  }
+  
+  mu <- as.numeric(mu)
+  Sigma <- make_posdef_prediction(as.matrix(Sigma))
+  p <- length(mu)
+  
+  expand_bound <- function(x, name) {
+    x <- as.numeric(x)
+    if (length(x) == 1L) {
+      return(rep(x, p))
+    }
+    if (length(x) != p) {
+      stop(sprintf("%s must have length 1 or length(mu).", name))
+    }
+    x
+  }
+  
+  lower <- expand_bound(lower, "lower")
+  upper <- expand_bound(upper, "upper")
+  
+  if (!all(dim(Sigma) == c(p, p))) {
+    stop("Sigma must be a square matrix with dimension length(mu).")
+  }
+  if (any(lower >= upper)) {
+    stop("Every lower truncation bound must be smaller than its upper bound.")
+  }
+  
+  if (method == "TruncatedNormal") {
+    if (!requireNamespace("TruncatedNormal", quietly = TRUE)) {
+      stop(
+        paste0(
+          "sample_method = 'TruncatedNormal' requires the TruncatedNormal package. ",
+          "Install it with install.packages('TruncatedNormal')."
+        )
+      )
+    }
+    
+    draws <- TruncatedNormal::rtmvnorm(
+      n = n,
+      mu = mu,
+      sigma = Sigma,
+      lb = lower,
+      ub = upper
+    )
+  } else {
+    if (!requireNamespace("tmvtnorm", quietly = TRUE)) {
+      stop(
+        paste0(
+          "This sample_method requires the tmvtnorm package. ",
+          "Install it with install.packages('tmvtnorm')."
+        )
+      )
+    }
+    
+    if (method == "tmvtnorm_gibbs") {
+      draws <- tmvtnorm::rtmvnorm(
+        n = n,
+        mean = mu,
+        sigma = Sigma,
+        lower = lower,
+        upper = upper,
+        algorithm = "gibbs",
+        burn.in.samples = as.integer(burn_in),
+        thinning = as.integer(thinning)
+      )
+    } 
+  }
+  
+  draws <- as.matrix(draws)
+  if (ncol(draws) != p && nrow(draws) == p) {
+    draws <- t(draws)
+  }
+  if (p == 1L && ncol(draws) != 1L) {
+    draws <- matrix(as.numeric(draws), ncol = 1L)
+  }
+  
+  if (nrow(draws) != n || ncol(draws) != p) {
+    stop("The truncated-normal sampler returned an unexpected dimension.")
+  }
+  if (any(!is.finite(draws))) {
+    stop("The truncated-normal sampler returned non-finite values.")
+  }
+  
+  tolerance <- 1e-8
+  below_lower <- sweep(draws, 2, lower, FUN = "-") < -tolerance
+  above_upper <- sweep(draws, 2, upper, FUN = "-") > tolerance
+  if (any(below_lower) || any(above_upper)) {
+    stop("Some truncated-normal draws violate the requested bounds.")
+  }
+  
+  draws
+}
+
+## Predict at one test point while integrating over censored neighbors.
+##
+## The analytical mean and variance use the truncated moments m_C and V_C.
+## The interval is based on composition samples and is generally asymmetric.
 gp_predict_with_censoring <- function(x_star,
                                       x_neighbors,
                                       y_neighbors = NULL,
@@ -1525,10 +1737,31 @@ gp_predict_with_censoring <- function(x_star,
                                       threshold_C,
                                       x_cols = NULL,
                                       predict_y = TRUE,
-                                      moment_method = c("auto", "TruncatedNormal", "tmvtnorm", "mc", "univariate"),
+                                      moment_method = c("auto", "tmvtnorm", "TruncatedNormal", "mc", "univariate"),
                                       moment_mc_samples = 20000L,
+                                      n_pred_samples = 5000L,
+                                      sample_method = c("TruncatedNormal", "tmvtnorm_gibbs"),
+                                      gibbs_burn_in = 2000L,
+                                      gibbs_thinning = 5L,
+                                      interval_level = 0.95,
+                                      prediction_seed = NULL,
+                                      return_draws = FALSE,
                                       jitter = 1e-8) {
   moment_method <- match.arg(moment_method)
+  sample_method <- match.arg(sample_method)
+  
+  if (!is.numeric(interval_level) || length(interval_level) != 1L ||
+      is.na(interval_level) || interval_level <= 0 || interval_level >= 1) {
+    stop("interval_level must be a number strictly between 0 and 1.")
+  }
+  n_pred_samples <- as.integer(n_pred_samples)
+  if (length(n_pred_samples) != 1L || is.na(n_pred_samples) || n_pred_samples < 2L) {
+    stop("n_pred_samples must be a single integer of at least 2.")
+  }
+  
+  if (!is.null(prediction_seed)) {
+    set.seed(as.integer(prediction_seed))
+  }
   
   if (is.null(x_cols)) {
     x_cols <- grep("^x[0-9]+$", names(x_neighbors), value = TRUE)
@@ -1558,101 +1791,279 @@ gp_predict_with_censoring <- function(x_star,
   
   X_nn <- as.matrix(x_neighbors[, x_cols, drop = FALSE])
   x_star <- as.matrix(x_star[, x_cols, drop = FALSE])
-  y_nn <- y_neighbors$y
+  y_nn <- as.numeric(y_neighbors$y)
   censored <- as.integer(y_neighbors$censored)
   n <- nrow(X_nn)
+  
+  if (length(y_nn) != n || length(censored) != n) {
+    stop("x_neighbors and y_neighbors must have the same number of rows.")
+  }
   
   idx_O <- which(censored == 0L)
   idx_C <- which(censored == 1L)
   m <- length(idx_C)
   
+  ## Training responses include nugget variance; the new latent response does not.
   K_all <- gp_cov_matrix(rbind(X_nn, x_star), tau_sq = tau_sq, ell = ell)
   K_all <- make_posdef_prediction(
-    K_all + diag(c(rep(sigma_sq, n), jitter)),
+    K_all + diag(c(rep(sigma_sq, n), 0)),
     jitter = jitter
   )
   
-  K_OO <- if (length(idx_O) > 0L) as.matrix(K_all[idx_O, idx_O, drop = FALSE]) else NULL
-  K_CO <- if (m > 0L && length(idx_O) > 0L) as.matrix(K_all[idx_C, idx_O, drop = FALSE]) else NULL
-  K_CC <- if (m > 0L) as.matrix(K_all[idx_C, idx_C, drop = FALSE]) else NULL
-  k_starO <- if (length(idx_O) > 0L) matrix(K_all[n + 1L, idx_O, drop = FALSE], nrow = 1) else NULL
-  k_starC <- if (m > 0L) matrix(K_all[n + 1L, idx_C, drop = FALSE], nrow = 1) else NULL
-  k_starstar <- K_all[n + 1L, n + 1L]
+  K_OO <- if (length(idx_O) > 0L) {
+    as.matrix(K_all[idx_O, idx_O, drop = FALSE])
+  } else {
+    NULL
+  }
+  K_CO <- if (m > 0L && length(idx_O) > 0L) {
+    as.matrix(K_all[idx_C, idx_O, drop = FALSE])
+  } else {
+    NULL
+  }
+  K_CC <- if (m > 0L) {
+    as.matrix(K_all[idx_C, idx_C, drop = FALSE])
+  } else {
+    NULL
+  }
+  k_starO <- if (length(idx_O) > 0L) {
+    matrix(K_all[n + 1L, idx_O, drop = FALSE], nrow = 1L)
+  } else {
+    NULL
+  }
+  k_starC <- if (m > 0L) {
+    matrix(K_all[n + 1L, idx_C, drop = FALSE], nrow = 1L)
+  } else {
+    NULL
+  }
+  k_starstar <- as.numeric(K_all[n + 1L, n + 1L])
   
-  mu_new <- beta0
-  mu_O <- rep(beta0, length(idx_O))
-  mu_C <- rep(beta0, length(idx_C))
+  mu_new <- as.numeric(beta0)
+  mu_O <- rep(mu_new, length(idx_O))
+  mu_C <- rep(mu_new, length(idx_C))
   
+  alpha_interval <- 1 - interval_level
+  
+  ## Case 1: no censored neighbors. The predictive distribution is Gaussian.
   if (m == 0L) {
     if (length(idx_O) > 0L) {
-      SOO_y <- chol_solve_prediction(K_OO, y_nn[idx_O] - mu_O, jitter = jitter)
-      mu_new_O <- as.numeric(mu_new + k_starO %*% SOO_y)
+      SOO_y <- chol_solve_prediction(
+        K_OO,
+        y_nn[idx_O] - mu_O,
+        jitter = jitter
+      )
+      mean_pred <- as.numeric(mu_new + k_starO %*% SOO_y)
       
-      SOO_k <- chol_solve_prediction(K_OO, t(k_starO), jitter = jitter)
-      var_f_star <- as.numeric(k_starstar - k_starO %*% SOO_k)
+      SOO_k <- chol_solve_prediction(
+        K_OO,
+        t(k_starO),
+        jitter = jitter
+      )
+      latent_var <- as.numeric(k_starstar - k_starO %*% SOO_k)
     } else {
-      mu_new_O <- mu_new
-      var_f_star <- as.numeric(k_starstar)
+      mean_pred <- mu_new
+      latent_var <- k_starstar
     }
     
-    var_pred <- if (predict_y) var_f_star + sigma_sq else var_f_star
-    if (!is.finite(var_pred)) {
-      var_pred <- NA_real_
+    latent_var <- max(latent_var, 1e-10)
+    var_pred <- latent_var + if (predict_y) sigma_sq else 0
+    var_pred <- max(as.numeric(var_pred), 1e-10)
+    
+    ci_lower <- stats::qnorm(
+      alpha_interval / 2,
+      mean = mean_pred,
+      sd = sqrt(var_pred)
+    )
+    ci_upper <- stats::qnorm(
+      1 - alpha_interval / 2,
+      mean = mean_pred,
+      sd = sqrt(var_pred)
+    )
+    
+    normal_draws <- NULL
+    if (return_draws) {
+      normal_draws <- stats::rnorm(
+        n = n_pred_samples,
+        mean = mean_pred,
+        sd = sqrt(var_pred)
+      )
     }
-    return(list(mean = mu_new_O, var = if (is.na(var_pred)) NA_real_ else max(var_pred, 1e-10)))
+    
+    return(list(
+      mean = mean_pred,
+      var = var_pred,
+      CI_lower = as.numeric(ci_lower),
+      CI_upper = as.numeric(ci_upper),
+      interval_length = as.numeric(ci_upper - ci_lower),
+      sample_mean = if (is.null(normal_draws)) mean_pred else mean(normal_draws),
+      sample_var = if (is.null(normal_draws)) var_pred else stats::var(normal_draws),
+      interval_method = "Gaussian quantiles",
+      moment_method = "not needed",
+      n_pred_samples = if (is.null(normal_draws)) 0L else n_pred_samples,
+      draws = normal_draws
+    ))
   }
   
+  ## Condition jointly on the uncensored neighbors.
   if (length(idx_O) > 0L) {
     S_OO_inv <- chol_solve_prediction(K_OO, jitter = jitter)
-    mu_new_O <- mu_new + drop(k_starO %*% S_OO_inv %*% (y_nn[idx_O] - mu_O))
-    K_newO_cond <- as.numeric(k_starstar - k_starO %*% S_OO_inv %*% t(k_starO))
     
-    mu_C_O <- mu_C + drop(K_CO %*% S_OO_inv %*% (y_nn[idx_O] - mu_O))
-    K_CC_O <- make_posdef_prediction(K_CC - K_CO %*% S_OO_inv %*% t(K_CO), jitter = jitter)
-    K_newC_O <- matrix(k_starC - k_starO %*% S_OO_inv %*% t(K_CO), nrow = 1)
+    mean_new_given_O <- as.numeric(
+      mu_new + k_starO %*% S_OO_inv %*% (y_nn[idx_O] - mu_O)
+    )
+    var_new_given_O <- as.numeric(
+      k_starstar - k_starO %*% S_OO_inv %*% t(k_starO)
+    )
+    
+    mean_C_given_O <- as.numeric(
+      mu_C + K_CO %*% S_OO_inv %*% (y_nn[idx_O] - mu_O)
+    )
+    cov_C_given_O <- make_posdef_prediction(
+      K_CC - K_CO %*% S_OO_inv %*% t(K_CO),
+      jitter = jitter
+    )
+    cov_new_C_given_O <- matrix(
+      k_starC - k_starO %*% S_OO_inv %*% t(K_CO),
+      nrow = 1L
+    )
   } else {
-    mu_new_O <- mu_new
-    K_newO_cond <- k_starstar
-    mu_C_O <- mu_C
-    K_CC_O <- K_CC
-    K_newC_O <- matrix(k_starC, nrow = 1)
+    mean_new_given_O <- mu_new
+    var_new_given_O <- k_starstar
+    mean_C_given_O <- mu_C
+    cov_C_given_O <- make_posdef_prediction(K_CC, jitter = jitter)
+    cov_new_C_given_O <- matrix(k_starC, nrow = 1L)
   }
   
-  c_vec <- rep(threshold_C, m)
-  mt <- truncated_mvn_moments(
-    mu = as.numeric(mu_C_O),
-    Sigma = K_CC_O,
+  ## Allow one common threshold, one threshold per neighbor, or one per
+  ## censored neighbor.
+  threshold_C <- as.numeric(threshold_C)
+  if (length(threshold_C) == 1L) {
+    c_vec <- rep(threshold_C, m)
+  } else if (length(threshold_C) == n) {
+    c_vec <- threshold_C[idx_C]
+  } else if (length(threshold_C) == m) {
+    c_vec <- threshold_C
+  } else {
+    stop(
+      paste0(
+        "threshold_C must have length 1, the number of all neighbors, ",
+        "or the number of censored neighbors."
+      )
+    )
+  }
+  
+  ## Step 1 of the composition sampler:
+  ## draw the unknown censored-neighbor responses from their TMVN law.
+  y_C_samples <- sample_truncated_mvn(
+    n = n_pred_samples,
+    mu = mean_C_given_O,
+    Sigma = cov_C_given_O,
     lower = c_vec,
     upper = rep(Inf, m),
-    method = moment_method,
-    mc_samples = moment_mc_samples
+    method = sample_method,
+    burn_in = gibbs_burn_in,
+    thinning = gibbs_thinning
   )
   
-  m_C <- mt$mean
-  V_C <- mt$var
+  ## Compute m_C and V_C for the analytical predictive mean and variance.
+  ## If the requested moment routine fails, use the same valid TMVN draws.
+  mt <- tryCatch(
+    truncated_mvn_moments(
+      mu = mean_C_given_O,
+      Sigma = cov_C_given_O,
+      lower = c_vec,
+      upper = rep(Inf, m),
+      method = moment_method,
+      mc_samples = moment_mc_samples,
+      mc_burn_in = gibbs_burn_in,
+      mc_thinning = gibbs_thinning
+    ),
+    error = function(e) NULL
+  )
   
-  S_CC_O_inv <- chol_solve_prediction(K_CC_O, jitter = jitter)
-  diff_vec <- matrix(m_C - mu_C_O, ncol = 1)
+  if (is.null(mt)) {
+    m_C <- colMeans(y_C_samples)
+    V_C <- stats::cov(y_C_samples)
+    if (m == 1L) {
+      V_C <- matrix(V_C, nrow = 1L, ncol = 1L)
+    }
+    moment_method_used <- "empirical moments from predictive TMVN draws"
+  } else {
+    m_C <- as.numeric(mt$mean)
+    V_C <- as.matrix(mt$var)
+    if (m == 1L) {
+      V_C <- matrix(V_C, nrow = 1L, ncol = 1L)
+    }
+    moment_method_used <- mt$method_used
+  }
   
-  mean_pred <- as.numeric(mu_new_O + K_newC_O %*% S_CC_O_inv %*% diff_vec)
+  S_CC_O_inv <- chol_solve_prediction(cov_C_given_O, jitter = jitter)
+  
+  ## B = Sigma_new,c|o Sigma_cc|o^{-1}
+  B <- cov_new_C_given_O %*% S_CC_O_inv
+  
+  ## Residual variance of y_new conditional on exact y_C values.
+  latent_residual_var <- as.numeric(
+    var_new_given_O - B %*% t(cov_new_C_given_O)
+  )
+  latent_residual_var <- max(latent_residual_var, 1e-10)
+  
+  ## Exact mean and variance formulas, given m_C and V_C.
+  mean_pred <- as.numeric(
+    mean_new_given_O +
+      B %*% matrix(m_C - mean_C_given_O, ncol = 1L)
+  )
   var_pred <- as.numeric(
-    K_newO_cond -
-      (K_newC_O %*% S_CC_O_inv %*% t(K_newC_O)) +
-      (K_newC_O %*% S_CC_O_inv %*% V_C %*% S_CC_O_inv %*% t(K_newC_O))
+    latent_residual_var + B %*% V_C %*% t(B)
   )
   
   if (predict_y) {
     var_pred <- var_pred + sigma_sq
   }
+  var_pred <- max(var_pred, 1e-10)
   
-  if (!is.finite(mean_pred)) {
-    mean_pred <- NA_real_
-  }
-  if (!is.finite(var_pred)) {
-    var_pred <- NA_real_
-  }
+  ## Step 2 of the composition sampler:
+  ## for every sampled censored vector, draw one new response.
+  centered_C_samples <- sweep(
+    y_C_samples,
+    MARGIN = 2,
+    STATS = mean_C_given_O,
+    FUN = "-"
+  )
+  conditional_means <- as.numeric(
+    mean_new_given_O + centered_C_samples %*% t(B)
+  )
   
-  list(mean = mean_pred, var = if (is.na(var_pred)) NA_real_ else max(var_pred, 1e-10))
+  conditional_residual_var <- latent_residual_var +
+    if (predict_y) sigma_sq else 0
+  conditional_residual_var <- max(conditional_residual_var, 1e-10)
+  
+  y_new_samples <- stats::rnorm(
+    n = n_pred_samples,
+    mean = conditional_means,
+    sd = sqrt(conditional_residual_var)
+  )
+  
+  empirical_interval <- stats::quantile(
+    y_new_samples,
+    probs = c(alpha_interval / 2, 1 - alpha_interval / 2),
+    names = FALSE,
+    na.rm = TRUE,
+    type = 7
+  )
+  
+  list(
+    mean = mean_pred,
+    var = var_pred,
+    CI_lower = as.numeric(empirical_interval[1L]),
+    CI_upper = as.numeric(empirical_interval[2L]),
+    interval_length = as.numeric(empirical_interval[2L] - empirical_interval[1L]),
+    sample_mean = mean(y_new_samples),
+    sample_var = stats::var(y_new_samples),
+    interval_method = "empirical predictive quantiles",
+    moment_method = moment_method_used,
+    n_pred_samples = n_pred_samples,
+    draws = if (return_draws) y_new_samples else NULL
+  )
 }
 
 ## Compute distances from training rows to one test point for prediction neighbor search.
@@ -1813,7 +2224,8 @@ select_prediction_neighbors_with_censoring <- function(train_data,
   )
 }
 
-## Predict over test data using censoring-aware neighbor selection and TMVN adjustment.
+## Predict over test data using censoring-aware neighbor selection.
+## Intervals are empirical predictive quantiles whenever censored neighbors occur.
 predict_censored_gp_nn_with_censoring <- function(fit = NULL,
                                                   train_data = NULL,
                                                   test_data,
@@ -1827,14 +2239,21 @@ predict_censored_gp_nn_with_censoring <- function(fit = NULL,
                                                   y_col = "y",
                                                   censored_col = "censored",
                                                   distance_method = c("euclidean", "correlation", "mahalanobis"),
-                                                  moment_method = c("auto", "TruncatedNormal", "tmvtnorm", "mc", "univariate"),
+                                                  moment_method = c("auto", "tmvtnorm", "TruncatedNormal", "mc", "univariate"),
                                                   moment_mc_samples = 20000L,
+                                                  n_pred_samples = 5000L,
+                                                  sample_method = c("TruncatedNormal", "tmvtnorm_gibbs"),
+                                                  gibbs_burn_in = 2000L,
+                                                  gibbs_thinning = 5L,
                                                   predict_y = TRUE,
                                                   interval_level = 0.95,
+                                                  prediction_seed = 123L,
+                                                  return_draws = FALSE,
                                                   unique_test_inputs = TRUE,
                                                   verbose = TRUE) {
   distance_method <- match.arg(distance_method)
   moment_method <- match.arg(moment_method)
+  sample_method <- match.arg(sample_method)
   
   if (!is.null(fit)) {
     if (is.null(params)) {
@@ -1858,7 +2277,8 @@ predict_censored_gp_nn_with_censoring <- function(fit = NULL,
     }
   }
   
-  if (is.null(train_data) || is.null(params) || is.null(x_cols) || is.null(threshold_C)) {
+  if (is.null(train_data) || is.null(params) ||
+      is.null(x_cols) || is.null(threshold_C)) {
     stop("Provide fit, or provide train_data, params, x_cols, and threshold_C.")
   }
   if (is.null(k)) {
@@ -1890,6 +2310,12 @@ predict_censored_gp_nn_with_censoring <- function(fit = NULL,
   }
   
   results_list <- vector("list", nrow(test_unique))
+  predictive_draws <- if (return_draws) {
+    vector("list", nrow(test_unique))
+  } else {
+    NULL
+  }
+  
   for (i in seq_len(nrow(test_unique))) {
     if (verbose) {
       cat(sprintf("Processing test row %d / %d...\n", i, nrow(test_unique)))
@@ -1908,6 +2334,12 @@ predict_censored_gp_nn_with_censoring <- function(fit = NULL,
       ell = ell
     )
     
+    seed_i <- if (is.null(prediction_seed)) {
+      NULL
+    } else {
+      as.integer(prediction_seed) + i - 1L
+    }
+    
     out <- tryCatch(
       gp_predict_with_censoring(
         x_star = test_row[, x_cols, drop = FALSE],
@@ -1918,41 +2350,79 @@ predict_censored_gp_nn_with_censoring <- function(fit = NULL,
         x_cols = x_cols,
         predict_y = predict_y,
         moment_method = moment_method,
-        moment_mc_samples = moment_mc_samples
+        moment_mc_samples = moment_mc_samples,
+        n_pred_samples = n_pred_samples,
+        sample_method = sample_method,
+        gibbs_burn_in = gibbs_burn_in,
+        gibbs_thinning = gibbs_thinning,
+        interval_level = interval_level,
+        prediction_seed = seed_i,
+        return_draws = return_draws
       ),
       error = function(e) {
         if (verbose) {
           message(sprintf("Error at test row %d: %s", i, e$message))
         }
-        list(mean = NA_real_, var = NA_real_)
+        list(
+          mean = NA_real_,
+          var = NA_real_,
+          CI_lower = NA_real_,
+          CI_upper = NA_real_,
+          interval_length = NA_real_,
+          sample_mean = NA_real_,
+          sample_var = NA_real_,
+          interval_method = NA_character_,
+          moment_method = NA_character_,
+          n_pred_samples = NA_integer_,
+          draws = NULL
+        )
       }
     )
-    
-    alpha <- 1 - interval_level
-    sd_pred <- sqrt(out$var)
-    ci_lower <- stats::qnorm(alpha / 2, mean = out$mean, sd = sd_pred)
-    ci_upper <- stats::qnorm(1 - alpha / 2, mean = out$mean, sd = sd_pred)
     
     results_list[[i]] <- data.frame(
       ID_test = if (id_col %in% names(test_row)) test_row[[id_col]] else i,
       mean_pred = out$mean,
       var_pred = out$var,
-      CI_lower = ci_lower,
-      CI_upper = ci_upper,
-      interval_length = ci_upper - ci_lower,
+      sample_mean = out$sample_mean,
+      sample_var = out$sample_var,
+      CI_lower = out$CI_lower,
+      CI_upper = out$CI_upper,
+      interval_length = out$interval_length,
+      interval_method = out$interval_method,
+      moment_method = out$moment_method,
+      n_pred_samples = out$n_pred_samples,
       n_total = selected$n_total,
       n_cens = selected$n_cens,
-      n_uncens = selected$n_uncens
+      n_uncens = selected$n_uncens,
+      stringsAsFactors = FALSE
     )
+    
+    if (return_draws) {
+      predictive_draws[[i]] <- out$draws
+    }
   }
   
   results_df <- do.call(rbind, results_list)
   average_interval <- mean(results_df$interval_length, na.rm = TRUE)
   
+  merge_columns <- c(
+    "ID_test",
+    "mean_pred",
+    "var_pred",
+    "sample_mean",
+    "sample_var",
+    "CI_lower",
+    "CI_upper",
+    "interval_length",
+    "interval_method",
+    "moment_method",
+    "n_pred_samples"
+  )
+  
   if (id_col %in% names(test_work)) {
     merged_df <- merge(
       test_work,
-      results_df[, c("ID_test", "mean_pred", "var_pred", "CI_lower", "CI_upper", "interval_length")],
+      results_df[, merge_columns, drop = FALSE],
       by.x = id_col,
       by.y = "ID_test",
       all.x = TRUE,
@@ -1964,14 +2434,19 @@ predict_censored_gp_nn_with_censoring <- function(fit = NULL,
   
   if (verbose) {
     cat("Prediction loop finished.\n")
-    cat(sprintf("Average %.1f%% interval length = %.4f\n", interval_level * 100, average_interval))
+    cat(sprintf(
+      "Average %.1f%% interval length = %.4f\n",
+      interval_level * 100,
+      average_interval
+    ))
   }
   
   list(
     results_df = results_df,
     merged_df = merged_df,
     average_interval = average_interval,
-    unique_test_data = test_unique
+    unique_test_data = test_unique,
+    predictive_draws = predictive_draws
   )
 }
 
@@ -2016,11 +2491,17 @@ print.censored_gp_nn_fit <- function(x, ...) {
 ## )
 ## pred1 <- predict_censored_gp_nn(fit1, dat1$test_data)
 ## pred1_cens <- predict_censored_gp_nn_with_censoring(
-##   fit = fit1,
-##   test_data = dat1$test_data,
-##   k = 20,
-##   max_censored_ids = 5
-## )
+##  fit = fit1,
+##  test_data = test_data,
+##  k = 20,
+##  max_censored_ids = 5,
+##  distance_method = "euclidean",
+##  n_pred_samples = 20000,
+##  sample_method = "TruncatedNormal",
+##  prediction_seed = 123,
+##  predict_y = TRUE,
+##  verbose = TRUE
+##)
 ##
 ## ## 1D with fixed 100-point test grid from 0 to 1:
 ## dat1_grid <- simulate_1d_censored_data(
@@ -2038,16 +2519,21 @@ print.censored_gp_nn_fit <- function(x, ...) {
 ##   x_cols = dat8$x_cols,
 ##   threshold_C = dat8$threshold_C,
 ##   k = 20,
-##   censor_method = "miwa",
+##   censor_method = "sov",
 ##   init_params = init8,
 ##   lower_bounds = c(1e-6, rep(1e-6, 8), 1e-6, -Inf),
 ##   upper_bounds = c(Inf, rep(Inf, 8), Inf, Inf)
 ## )
 ## pred8 <- predict_censored_gp_nn(fit8, dat8$test_data)
 ## pred8_cens <- predict_censored_gp_nn_with_censoring(
-##   fit = fit8,
-##   test_data = dat8$test_data,
-##   k = 20,
-##   max_censored_ids = 5,
-##   distance_method = "euclidean"
+##  fit = fit8,
+##  test_data = dat8$test_data,
+##  k = 20,
+##  max_censored_ids = 5,
+##  distance_method = "euclidean",
+##  n_pred_samples = 20000,
+##  sample_method = "TruncatedNormal",
+##  prediction_seed = 123,
+##  predict_y = TRUE,
+##  verbose = TRUE
 ## )

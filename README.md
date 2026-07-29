@@ -318,9 +318,9 @@ fit$final_log_likelihood
 #> [1] -22.42993
 fit$optim_time
 #>    user  system elapsed 
-#>   0.262   0.416  60.210
+#>   0.264   0.449  61.656
 fit$total_seconds
-#> [1] 60.50465
+#> [1] 61.92279
 fit$used_parallel
 #> [1] TRUE
 ```
@@ -346,9 +346,12 @@ pred <- predict_censored_gp_nn_with_censoring(
   k = 20,
   max_censored_ids = 5,
   min_uncensored_ids = 15,
-  distance_method = "correlation",
-  moment_method = "auto",
+  distance_method = "euclidean",
+  moment_method = "tmvtnorm",
   predict_y = TRUE,
+  n_pred_samples = 20000,
+  sample_method = "TruncatedNormal",
+  prediction_seed = 123,
   interval_level = 0.95,
   unique_test_inputs = TRUE,
   verbose = FALSE
@@ -356,19 +359,26 @@ pred <- predict_censored_gp_nn_with_censoring(
 
 head(pred$merged_df)
 #>   ID         x1           y  y_censored censored  mean_pred   var_pred
-#> 1  1 0.00000000 -0.08466849 -0.08466849        0 -0.0565998 0.04138639
-#> 2  2 0.01010101 -0.16183861 -0.16183861        0 -0.1896147 0.03671581
-#> 3  3 0.02020202 -0.25079116 -0.25079116        0 -0.2871950 0.03569056
-#> 4  4 0.03030303 -0.34931306 -0.34931306        0 -0.3852831 0.03568647
-#> 5  5 0.04040404 -0.45497636 -0.45497636        0 -0.5029378 0.03562846
-#> 6  6 0.05050505 -0.56518751 -0.56518751        0 -0.5981471 0.03567716
-#>     CI_lower    CI_upper interval_length
-#> 1 -0.4553279  0.34212833       0.7974563
-#> 2 -0.5651706  0.18594129       0.7511119
-#> 3 -0.6574703  0.08308030       0.7405506
-#> 4 -0.7555372 -0.01502901       0.7405082
-#> 5 -0.8728909 -0.13298475       0.7399061
-#> 6 -0.9683529 -0.22794133       0.7404116
+#> 1  1 0.00000000 -0.08466849 -0.08466849        0 -0.0565998 0.04138638
+#> 2  2 0.01010101 -0.16183861 -0.16183861        0 -0.1896147 0.03671580
+#> 3  3 0.02020202 -0.25079116 -0.25079116        0 -0.2871950 0.03569055
+#> 4  4 0.03030303 -0.34931306 -0.34931306        0 -0.3852831 0.03568646
+#> 5  5 0.04040404 -0.45497636 -0.45497636        0 -0.5029378 0.03562845
+#> 6  6 0.05050505 -0.56518751 -0.56518751        0 -0.5981471 0.03567715
+#>   sample_mean sample_var   CI_lower    CI_upper interval_length
+#> 1  -0.0565998 0.04138638 -0.4553279  0.34212828       0.7974562
+#> 2  -0.1896147 0.03671580 -0.5651706  0.18594124       0.7511118
+#> 3  -0.2871950 0.03569055 -0.6574703  0.08308025       0.7405505
+#> 4  -0.3852831 0.03568646 -0.7555372 -0.01502906       0.7405081
+#> 5  -0.5029378 0.03562845 -0.8728908 -0.13298480       0.7399060
+#> 6  -0.5981471 0.03567715 -0.9683529 -0.22794138       0.7404115
+#>      interval_method moment_method n_pred_samples
+#> 1 Gaussian quantiles    not needed              0
+#> 2 Gaussian quantiles    not needed              0
+#> 3 Gaussian quantiles    not needed              0
+#> 4 Gaussian quantiles    not needed              0
+#> 5 Gaussian quantiles    not needed              0
+#> 6 Gaussian quantiles    not needed              0
 ```
 
 The key prediction arguments are:
@@ -381,9 +391,19 @@ The key prediction arguments are:
   used for moment adjustment.
 - `min_uncensored_ids`: the minimum number of uncensored neighboring IDs
   required before applying the default prediction rule.
-- `distance_method = "correlation"`: ranks neighbors by GP-implied
-  correlation.
-- `interval_level = 0.95`: produces 95% prediction intervals.
+- `distance_method = "euclidean"`: ranks neighbors by Euclidean distance
+  in the input space.
+- `moment_method = "tmvtnorm"`: computes the truncated-normal moments
+  used for the analytical predictive mean and variance.
+- `n_pred_samples`: number of predictive samples used to estimate
+  empirical interval quantiles.
+- `sample_method = "TruncatedNormal"`: samples censored-neighbor latent
+  values from the truncated multivariate normal using the
+  `TruncatedNormal` package.
+- `interval_level`: sets the nominal prediction-interval coverage; with
+  censored neighbors, the endpoints are the matching empirical quantiles
+  of the predictive samples.
+- `verbose = FALSE`: suppresses progress messages during prediction.
 
 ## Visualize predictions
 
@@ -490,6 +510,13 @@ p2 <- ggplot(simple_df, aes(x = x1)) +
   ) +
   geom_line(aes(y = true_f, color = "true f"), linewidth = 1) +
   geom_line(aes(y = predicted_mean, color = "simple predictor"), linewidth = 1) +
+  scale_color_manual(
+    values = c(
+      "true f" = "#F8766D",
+      "simple predictor" = "#00BFC4"
+    ),
+    breaks = c("true f", "simple predictor")
+  ) +
   geom_hline(yintercept = C, linetype = "dashed") +
   labs(
     title = "Prediction using uncensored neighbors only",
