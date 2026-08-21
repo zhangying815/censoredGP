@@ -8,8 +8,6 @@
 ##   2. "remove_censored": replace y by y_censored, then remove censored rows
 ##   3. "threshold_all":   replace y by y_censored and keep all rows
 ##
-## Prediction test_data is always:
-##   data.frame(x1 = seq(0, 1, length.out = 100), ...)
 ## =====================================================
 
 required_vgp_packages <- function(use_parallel = TRUE) {
